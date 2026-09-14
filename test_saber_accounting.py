@@ -88,9 +88,19 @@ class SaberAccountingTest(unittest.TestCase):
                 ws.append([invoice_number,"14-09-2026","Supplier",100,11,111])
                 for column in (4,5,6):
                     ws.cell(ws.max_row,column).number_format=number_format
+            ws.append(["EUR-BLANK-VAT","14-09-2026","Supplier",100,None,100])
+            ws.cell(ws.max_row,4).number_format='€#,##0.00'
+            ws.cell(ws.max_row,5).number_format='"$"#,##0.00'
+            ws.cell(ws.max_row,6).number_format='€#,##0.00'
+            ws.append(["EUR-MAJORITY","14-09-2026","Supplier",100,11,111])
+            ws.cell(ws.max_row,4).number_format='€#,##0.00'
+            ws.cell(ws.max_row,5).number_format='"$"#,##0.00'
+            ws.cell(ws.max_row,6).number_format='€#,##0.00'
             wb.save(path)
             rows=read_invoices(path)
-            self.assertEqual([row["currency"] for row in rows],["USD","EUR","LBP","AED"])
+            self.assertEqual([row["currency"] for row in rows],["USD","EUR","LBP","AED","EUR","EUR"])
+            self.assertNotIn("conflicting",rows[4]["currency_issue"])
+            self.assertTrue(rows[5]["currency_issue"].startswith("conflicting:"))
 
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:
