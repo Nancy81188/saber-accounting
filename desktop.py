@@ -122,9 +122,11 @@ class SaberApp(tk.Tk):
 
     def send_import(self):
         if not self.import_rows: return messagebox.showwarning("Import","Choose a file first")
-        try: result=self.client.import_invoices(self.import_rows)
+        if not messagebox.askyesno("Replace previous data","This import will remove all previous invoices and replace them with the selected Excel file. A safety backup will be created. Continue?"):
+            return
+        try: result=self.client.import_invoices(self.import_rows,replace_existing=True)
         except Exception as exc: return messagebox.showerror("Import",str(exc))
-        messagebox.showinfo("Import",f'{result["imported"]} {tr(self.language.get(),"imported")}\nErrors: {len(result["errors"])}')
+        messagebox.showinfo("Import",f'Previous invoices removed: {result["deleted"]}\n{result["imported"]} {tr(self.language.get(),"imported")}\nErrors: {len(result["errors"])}')
         self.load_dashboard(); self.load_invoices()
 
     def build_trial(self):

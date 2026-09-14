@@ -32,4 +32,14 @@ class SaberAccountingTest(unittest.TestCase):
             export_excel(xlsx,"Dashboard",headers,rows); export_pdf(pdf,"Dashboard",headers,rows)
             self.assertGreater(xlsx.stat().st_size,1000); self.assertGreater(pdf.stat().st_size,500)
 
+    def test_replacement_removes_previous_invoice_set(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"test.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            first={"invoice_number":"1","invoice_date":"2026-09-01","party_name":"A","kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111}
+            second={"invoice_number":"2","invoice_date":"2026-09-02","party_name":"B","kind":"purchase","currency":"USD","subtotal":200,"vat":22,"total":222}
+            db.import_invoice(first,user["id"]); result=db.clear_invoices(user["id"]); db.import_invoice(second,user["id"])
+            self.assertEqual(result["deleted"],1); self.assertTrue(Path(result["backup"]).exists())
+            invoices=db.list_invoices(); self.assertEqual(len(invoices),1); self.assertEqual(invoices[0]["invoice_number"],"2")
+
 if __name__ == "__main__": unittest.main()

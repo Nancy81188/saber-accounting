@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import shutil
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -116,6 +117,27 @@ class Database:
     def _account_id(self, db, code):
         row = db.execute("SELECT id FROM accounts WHERE code=?", (code,)).fetchone()
         return row["id"]
+
+    def backup(self):
+        source = Path(self.path)
+        if not source.exists(): return None
+        folder = source.parent / "backups"; folder.mkdir(parents=True, exist_ok=True)
+        target = folder / f"saber_accounting_{datetime.now():%Y%m%d_%H%M%S_%f}.db"
+        shutil.copy2(source, target)
+        return str(target)
+
+    def clear_invoices(self, user_id):
+        backup_path = self.backup()
+        with self.connect() as db:
+            entry_ids = [r["id"] for r in db.execute("SELECT id FROM journal_entries WHERE source_type='invoice'")]
+            if entry_ids:
+                marks = ",".join("?" for _ in entry_ids)
+                db.execute(f"DELETE FROM journal_lines WHERE entry_id IN ({marks})", entry_ids)
+                db.execute(f"DELETE FROM journal_entries WHERE id IN ({marks})", entry_ids)
+            deleted = db.execute("SELECT COUNT(*) n FROM invoices").fetchone()["n"]
+            db.execute("DELETE FROM invoices")
+            db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)", (user_id,"replace","invoice_import",json.dumps({"deleted":deleted,"backup":backup_path}),utcnow()))
+            return {"deleted": deleted, "backup": backup_path}
 
     def import_invoice(self, item, user_id):
         # No uniqueness constraint is applied to invoice numbers: duplicates are intentionally retained.

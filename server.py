@@ -62,13 +62,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             items = body.get("items", [])
             if not isinstance(items, list) or len(items) > 5000:
                 return self._json(400, {"error": "Invalid import batch"})
+            replacement = self.db.clear_invoices(user["id"]) if body.get("replace_existing", False) else {"deleted": 0, "backup": None}
             ids, errors = [], []
             for index, item in enumerate(items):
                 try:
                     ids.append(self.db.import_invoice(item, user["id"]))
                 except Exception as exc:
                     errors.append({"index": index, "invoice_number": item.get("invoice_number"), "error": str(exc)})
-            return self._json(200, {"imported": len(ids), "ids": ids, "errors": errors})
+            return self._json(200, {"imported": len(ids), "ids": ids, "errors": errors, "deleted": replacement["deleted"], "backup": replacement["backup"]})
         return self._json(404, {"error": "Not found"})
 
 def run_server(host="0.0.0.0", port=8765, database="saber_accounting.db", admin_password="ChangeMe123!"):
