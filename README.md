@@ -3,7 +3,9 @@
 Saber Accounting is a Windows desktop accounting application with a central shared database for three users. This first version includes:
 
 - English, Arabic, and French interface
-- USD, LBP, EUR, and AED invoice records
+- Automatic USD, EUR, LBP, and AED detection from currency and amount cells
+- Missing currency defaults to USD; conflicting or unsupported currencies are flagged for review
+- Currency filter for the dashboard, invoices, trial balance, and exported reports
 - Lebanese VAT at 11%
 - Purchase and sales invoice import from Excel
 - Original invoice number when supplied; otherwise original Excel row number
