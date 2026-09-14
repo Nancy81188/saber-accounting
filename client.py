@@ -34,3 +34,4 @@ class ApiClient:
     def invoices(self): return self.request("GET", "/api/invoices")["items"]
     def trial_balance(self): return self.request("GET", "/api/trial-balance")["items"]
     def import_invoices(self, items, replace_existing=True): return self.request("POST", "/api/invoices/import", {"items": items, "replace_existing": replace_existing})
+    def create_manual_invoice(self, invoice, items): return self.request("POST", "/api/invoices/manual", {"invoice": invoice, "items": items})

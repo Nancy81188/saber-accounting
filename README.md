@@ -8,6 +8,9 @@ Saber Accounting is a Windows desktop accounting application with a central shar
 - Currency filter for the dashboard, invoices, trial balance, and exported reports
 - Lebanese VAT at 11%
 - Purchase and sales invoice import from Excel
+- Manual purchase and sales invoice entry with multiple items
+- Automatic 11% VAT per item, with editable VAT rate and VAT amount
+- Editable total before VAT per item with automatic invoice totals
 - Original invoice number when supplied; otherwise original Excel row number
 - Completely empty rows skipped; duplicate invoices retained
 - Automatic double-entry journal posting
