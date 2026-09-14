@@ -58,6 +58,20 @@ class ApiHandler(BaseHTTPRequestHandler):
         user = self._user()
         if not user:
             return self._json(401, {"error": "Unauthorized"})
+        if path == "/api/invoices/manual":
+            invoice = body.get("invoice", {})
+            items = body.get("items", [])
+            if not isinstance(invoice, dict) or not isinstance(items, list) or len(items) > 500:
+                return self._json(400, {"error": "Invalid manual invoice"})
+            required = ("invoice_number", "invoice_date", "party_name", "kind", "currency")
+            missing = [field for field in required if not str(invoice.get(field) or "").strip()]
+            if missing:
+                return self._json(400, {"error": "Missing fields: " + ", ".join(missing)})
+            try:
+                invoice_id = self.db.create_manual_invoice(invoice, items, user["id"])
+            except Exception as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(201, {"invoice_id": invoice_id})
         if path == "/api/invoices/import":
             items = body.get("items", [])
             if not isinstance(items, list) or len(items) > 5000:
