@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS invoices (
  id INTEGER PRIMARY KEY, invoice_number TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('sale','purchase')),
  invoice_date TEXT, party_id INTEGER REFERENCES parties(id), currency TEXT NOT NULL, exchange_rate TEXT NOT NULL DEFAULT '1',
- subtotal TEXT, vat TEXT, total TEXT, status TEXT NOT NULL DEFAULT 'posted', source_file TEXT, source_row INTEGER,
+ subtotal TEXT, vat TEXT, total TEXT, status TEXT NOT NULL DEFAULT 'posted', currency_issue TEXT NOT NULL DEFAULT '', source_file TEXT, source_row INTEGER,
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS journal_entries (
@@ -98,6 +98,9 @@ class Database:
     def initialize(self, admin_password="ChangeMe123!"):
         with self.connect() as db:
             db.executescript(SCHEMA)
+            invoice_columns = {row["name"] for row in db.execute("PRAGMA table_info(invoices)")}
+            if "currency_issue" not in invoice_columns:
+                db.execute("ALTER TABLE invoices ADD COLUMN currency_issue TEXT NOT NULL DEFAULT ''")
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
             db.executemany("INSERT OR IGNORE INTO accounts(code,name_en,name_ar,name_fr,type) VALUES(?,?,?,?,?)", DEFAULT_ACCOUNTS)
 
@@ -146,12 +149,13 @@ class Database:
             db.execute("INSERT OR IGNORE INTO parties(kind,name,currency) VALUES(?,?,?)", (party_kind, item.get("party_name") or "Unspecified", item.get("currency", "USD")))
             party = db.execute("SELECT id FROM parties WHERE kind=? AND name=?", (party_kind, item.get("party_name") or "Unspecified")).fetchone()
             subtotal = Decimal(str(item.get("subtotal") or 0)); vat = Decimal(str(item.get("vat") or 0)); total = Decimal(str(item.get("total") or subtotal + vat))
-            status = "posted" if total == subtotal + vat else "review"
-            cur = db.execute("""INSERT INTO invoices(invoice_number,kind,invoice_date,party_id,currency,exchange_rate,subtotal,vat,total,status,source_file,source_row,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            currency_issue = str(item.get("currency_issue") or "")
+            status = "posted" if total == subtotal + vat and not currency_issue.startswith(("conflicting:", "unsupported:")) else "review"
+            cur = db.execute("""INSERT INTO invoices(invoice_number,kind,invoice_date,party_id,currency,exchange_rate,subtotal,vat,total,status,currency_issue,source_file,source_row,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 str(item["invoice_number"]), item["kind"], item.get("invoice_date"), party["id"], item.get("currency", "USD"),
                 str(item.get("exchange_rate", 1)), str(item.get("subtotal") or 0), str(item.get("vat") or 0), str(item.get("total") or 0),
-                status, item.get("source_file"), item.get("source_row"), user_id, utcnow()))
+                status, currency_issue, item.get("source_file"), item.get("source_row"), user_id, utcnow()))
             invoice_id = cur.lastrowid
             entry_number = f"INV-{invoice_id}"
             entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -175,7 +179,7 @@ class Database:
 
     def list_invoices(self, limit=500):
         with self.connect() as db:
-            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,i.source_row
+            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.source_row
                 FROM invoices i LEFT JOIN parties p ON p.id=i.party_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
 
     def dashboard(self):
@@ -185,7 +189,8 @@ class Database:
 
     def trial_balance(self):
         with self.connect() as db:
-            rows = db.execute("""SELECT a.code,a.name_en,SUM(CAST(j.debit AS REAL)) debit,SUM(CAST(j.credit AS REAL)) credit,
-                SUM(CAST(j.debit AS REAL)-CAST(j.credit AS REAL)) balance FROM accounts a LEFT JOIN journal_lines j ON j.account_id=a.id
-                GROUP BY a.id ORDER BY a.code""").fetchall()
+            rows = db.execute("""SELECT a.code,a.name_en,e.currency,SUM(CAST(j.debit AS REAL)) debit,SUM(CAST(j.credit AS REAL)) credit,
+                SUM(CAST(j.debit AS REAL)-CAST(j.credit AS REAL)) balance
+                FROM journal_lines j JOIN accounts a ON a.id=j.account_id JOIN journal_entries e ON e.id=j.entry_id
+                GROUP BY a.id,e.currency ORDER BY e.currency,a.code""").fetchall()
             return [dict(r) for r in rows]
