@@ -73,8 +73,6 @@ def _currency(values, columns, default_currency, number_formats=()):
     if currency_index is not None and currency_index < len(values):
         currency_cell = str(values[currency_index] or "").strip()
     explicit = _detected_currencies(currency_cell)
-    if len(explicit) == 1:
-        return next(iter(explicit)), ""
     if len(explicit) > 1:
         selected = next(code for code in SUPPORTED_CURRENCIES if code in explicit)
         return selected, "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in explicit)
@@ -94,6 +92,11 @@ def _currency(values, columns, default_currency, number_formats=()):
             votes[code] += 1
 
     found = {code for code, count in votes.items() if count}
+    if len(explicit) == 1:
+        selected = next(iter(explicit))
+        combined = found | explicit
+        issue = "" if len(combined) <= 1 else "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in combined)
+        return selected, issue
     if len(found) == 1:
         return next(iter(found)), ""
     if len(found) > 1:
