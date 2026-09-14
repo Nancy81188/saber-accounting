@@ -84,3 +84,7 @@ The default server database is `SaberAccounting/saber_accounting_v0_7.db`. This 
 ## Version 0.7.2 Excel currency formats
 
 Excel imports detect USD, EUR, LBP, and AED from both cell contents and Excel Accounting/Custom number formats. This supports sheets where currency symbols are displayed beside numeric values without a separate Currency column. Imported dashboards, invoice lists, trial balances, and exports remain separated by currency.
+
+## Version 0.7.3 currency page filter
+
+The Import Excel preview includes an All/USD/EUR/LBP/AED selector and Apply button. Only rows assigned to the selected currency are displayed. Blank cells with leftover number formatting are ignored during detection; genuinely mixed rows are assigned using Total, Before VAT, and VAT evidence and remain flagged for review.
