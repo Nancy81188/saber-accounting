@@ -149,6 +149,9 @@ class SaberApp(tk.Tk):
         actions=tk.Frame(self.manual_tab,bg=LIGHT); actions.pack(pady=(0,10))
         tk.Button(actions,text="Remove Selected Item",command=self.remove_manual_item,bg="#8B1E1E",fg="white",border=0,padx=14,pady=7).pack(side="left",padx=5)
         tk.Button(actions,text="Save Invoice",command=self.save_manual_invoice,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=22,pady=7).pack(side="left",padx=5)
+        tk.Button(actions,text="Excel",command=lambda:self.manual_entry_report("xlsx"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
+        tk.Button(actions,text="PDF",command=lambda:self.manual_entry_report("pdf"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
+        tk.Button(actions,text="Print",command=lambda:self.manual_entry_report("print"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
         self.manual_totals=tk.Label(actions,text="Before VAT: 0.00   VAT: 0.00   Total: 0.00",bg=LIGHT,font=("Segoe UI",10,"bold"))
         self.manual_totals.pack(side="left",padx=18)
 
@@ -192,6 +195,30 @@ class SaberApp(tk.Tk):
         subtotal=sum(float(item["subtotal"]) for item in self.manual_items)
         vat=sum(float(item["vat"]) for item in self.manual_items)
         self.manual_totals.config(text=f"Before VAT: {subtotal:,.2f}   VAT: {vat:,.2f}   Total: {subtotal+vat:,.2f}")
+
+    def manual_entry_report(self, format_name):
+        if not self.manual_items:
+            return messagebox.showwarning("Manual Entry","Add at least one invoice item")
+        invoice_no=self.manual_no.get().strip() or "Draft"
+        party=self.manual_party.get().strip() or "Unspecified"
+        currency=self.manual_currency.get()
+        title=f"Invoice {invoice_no} - {party} - {currency}"
+        headers=["Description","Quantity","Unit Price","Before VAT","VAT %","VAT Amount","After VAT"]
+        rows=[[item["description"],item["quantity"],item["unit_price"],item["subtotal"],item["vat_rate"],item["vat"],item["total"]] for item in self.manual_items]
+        rows.append(["","",f"TOTAL {currency}",sum(float(item["subtotal"]) for item in self.manual_items),
+                     "",sum(float(item["vat"]) for item in self.manual_items),sum(float(item["total"]) for item in self.manual_items)])
+        try:
+            if format_name=="print":
+                print_rows(title,headers,rows); return
+            extension=".xlsx" if format_name=="xlsx" else ".pdf"
+            path=filedialog.asksaveasfilename(defaultextension=extension,
+                filetypes=[("Excel workbook","*.xlsx")] if format_name=="xlsx" else [("PDF document","*.pdf")],
+                initialfile=f"Invoice_{invoice_no}_{currency}{extension}")
+            if not path: return
+            (export_excel if format_name=="xlsx" else export_pdf)(path,title,headers,rows)
+            messagebox.showinfo("Manual Entry",f"Saved successfully:\\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Manual Entry",str(exc))
 
     def save_manual_invoice(self):
         invoice={"invoice_number":self.manual_no.get().strip(),"invoice_date":self.manual_date.get().strip(),
