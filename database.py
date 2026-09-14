@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS invoices (
  subtotal TEXT, vat TEXT, total TEXT, status TEXT NOT NULL DEFAULT 'posted', currency_issue TEXT NOT NULL DEFAULT '', source_file TEXT, source_row INTEGER,
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS invoice_items (
+ id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+ description TEXT NOT NULL, quantity TEXT NOT NULL, unit_price TEXT NOT NULL,
+ subtotal TEXT NOT NULL, vat_rate TEXT NOT NULL, vat TEXT NOT NULL, total TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS journal_entries (
  id INTEGER PRIMARY KEY, entry_number TEXT NOT NULL UNIQUE, entry_date TEXT, description TEXT, source_type TEXT,
  source_id INTEGER, currency TEXT NOT NULL, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
@@ -176,6 +181,48 @@ class Database:
                 raise ValueError(f"Unbalanced journal entry for invoice {item['invoice_number']}")
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)", (user_id, "import", "invoice", invoice_id, json.dumps({"source_file": item.get("source_file"), "source_row": item.get("source_row")}), utcnow()))
             return invoice_id
+
+    def create_manual_invoice(self, item, line_items, user_id):
+        if not isinstance(line_items, list) or not line_items:
+            raise ValueError("Add at least one invoice item")
+        normalized = []
+        subtotal_total = Decimal("0")
+        vat_total = Decimal("0")
+        for index, line in enumerate(line_items, start=1):
+            description = str(line.get("description") or "").strip()
+            if not description:
+                raise ValueError(f"Item {index}: description is required")
+            try:
+                quantity = Decimal(str(line.get("quantity") or 0))
+                unit_price = Decimal(str(line.get("unit_price") or 0))
+                vat_rate = Decimal(str(line.get("vat_rate") if line.get("vat_rate") not in (None, "") else 11))
+            except Exception as exc:
+                raise ValueError(f"Item {index}: invalid quantity, price, or VAT rate") from exc
+            if quantity <= 0 or unit_price < 0 or vat_rate < 0:
+                raise ValueError(f"Item {index}: values cannot be negative and quantity must be above zero")
+            subtotal = (quantity * unit_price).quantize(Decimal("0.01"))
+            supplied_vat = line.get("vat")
+            vat = (subtotal * vat_rate / Decimal("100")).quantize(Decimal("0.01")) if supplied_vat in (None, "") else Decimal(str(supplied_vat)).quantize(Decimal("0.01"))
+            if vat < 0:
+                raise ValueError(f"Item {index}: VAT cannot be negative")
+            total = subtotal + vat
+            normalized.append((description, quantity, unit_price, subtotal, vat_rate, vat, total))
+            subtotal_total += subtotal
+            vat_total += vat
+        invoice = dict(item)
+        invoice["subtotal"] = float(subtotal_total)
+        invoice["vat"] = float(vat_total)
+        invoice["total"] = float(subtotal_total + vat_total)
+        invoice_id = self.import_invoice(invoice, user_id)
+        with self.connect() as db:
+            db.executemany("""INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,subtotal,vat_rate,vat,total)
+                VALUES(?,?,?,?,?,?,?,?)""", [
+                (invoice_id, description, str(quantity), str(unit_price), str(subtotal), str(vat_rate), str(vat), str(total))
+                for description, quantity, unit_price, subtotal, vat_rate, vat, total in normalized
+            ])
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id, "manual_entry", "invoice", invoice_id, json.dumps({"items": len(normalized)}), utcnow()))
+        return invoice_id
 
     def list_invoices(self, limit=500):
         with self.connect() as db:
