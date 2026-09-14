@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 from client import ApiClient
 from i18n import tr
 from importer import read_invoices
+from report_export import export_excel, export_pdf, print_rows
 
 NAVY, GOLD, LIGHT = "#071b2e", "#c9a96a", "#f3f6f8"
 
@@ -77,13 +78,17 @@ class SaberApp(tk.Tk):
 
     def build_dashboard(self):
         self.dashboard_tree=self.table(self.dashboard_tab,[("kind","Type",130),("currency","Currency",100),("count","Invoices",100),("subtotal","Before VAT",160),("vat","VAT",140),("total","Total",160)])
-        tk.Button(self.dashboard_tab,text=tr(self.language.get(),"refresh"),command=self.load_dashboard,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(pady=(0,10))
+        actions=tk.Frame(self.dashboard_tab,bg=LIGHT); actions.pack(pady=(0,10))
+        self.action_button(actions,tr(self.language.get(),"refresh"),self.load_dashboard).pack(side="left",padx=4)
+        self.action_button(actions,"Export Excel",lambda:self.export_report("dashboard","xlsx")).pack(side="left",padx=4)
+        self.action_button(actions,"Export PDF",lambda:self.export_report("dashboard","pdf")).pack(side="left",padx=4)
+        self.action_button(actions,"Print",lambda:self.export_report("dashboard","print")).pack(side="left",padx=4)
         self.load_dashboard()
 
     def load_dashboard(self):
         try: rows=self.client.dashboard()
         except Exception as exc: return messagebox.showerror("Error",str(exc))
-        self.dashboard_tree.delete(*self.dashboard_tree.get_children())
+        self.dashboard_rows=rows; self.dashboard_tree.delete(*self.dashboard_tree.get_children())
         for r in rows: self.dashboard_tree.insert("", "end", values=(r["kind"],r["currency"],r["count"],f'{r["subtotal"]:,.2f}',f'{r["vat"]:,.2f}',f'{r["total"]:,.2f}'))
 
     def build_invoices(self):
@@ -124,13 +129,38 @@ class SaberApp(tk.Tk):
 
     def build_trial(self):
         self.trial_tree=self.table(self.trial_tab,[("code","Account",110),("name","Name",280),("debit","Debit",150),("credit","Credit",150),("balance","Balance",160)])
-        tk.Button(self.trial_tab,text=tr(self.language.get(),"refresh"),command=self.load_trial,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(pady=(0,10)); self.load_trial()
+        actions=tk.Frame(self.trial_tab,bg=LIGHT); actions.pack(pady=(0,10))
+        self.action_button(actions,tr(self.language.get(),"refresh"),self.load_trial).pack(side="left",padx=4)
+        self.action_button(actions,"Export Excel",lambda:self.export_report("trial","xlsx")).pack(side="left",padx=4)
+        self.action_button(actions,"Export PDF",lambda:self.export_report("trial","pdf")).pack(side="left",padx=4)
+        self.action_button(actions,"Print",lambda:self.export_report("trial","print")).pack(side="left",padx=4); self.load_trial()
 
     def load_trial(self):
         try: rows=self.client.trial_balance()
         except Exception as exc: return messagebox.showerror("Error",str(exc))
-        self.trial_tree.delete(*self.trial_tree.get_children())
+        self.trial_rows=rows; self.trial_tree.delete(*self.trial_tree.get_children())
         for r in rows: self.trial_tree.insert("","end",values=(r["code"],r["name_en"],f'{r["debit"] or 0:,.2f}',f'{r["credit"] or 0:,.2f}',f'{r["balance"] or 0:,.2f}'))
+
+    def action_button(self,parent,text,command):
+        return tk.Button(parent,text=text,command=command,bg=NAVY,fg="white",border=0,padx=15,pady=7)
+
+    def export_report(self,report,format_name):
+        if report == "dashboard":
+            title="Saber Accounting - Dashboard"; headers=["Type","Currency","Invoices","Before VAT","VAT","Total"]
+            rows=[[r["kind"],r["currency"],r["count"],r["subtotal"],r["vat"],r["total"]] for r in getattr(self,"dashboard_rows",[])]
+        else:
+            title="Saber Accounting - Trial Balance"; headers=["Account","Name","Debit","Credit","Balance"]
+            rows=[[r["code"],r["name_en"],r["debit"] or 0,r["credit"] or 0,r["balance"] or 0] for r in getattr(self,"trial_rows",[])]
+            rows.append(["","TOTAL",sum(float(r[2]) for r in rows),sum(float(r[3]) for r in rows),sum(float(r[4]) for r in rows)])
+        if not rows: return messagebox.showwarning("Saber Accounting","No report data to export")
+        try:
+            if format_name == "print": print_rows(title,headers,rows); return
+            extension=".xlsx" if format_name=="xlsx" else ".pdf"
+            path=filedialog.asksaveasfilename(defaultextension=extension,filetypes=[("Excel workbook","*.xlsx")] if format_name=="xlsx" else [("PDF document","*.pdf")],initialfile=title.replace(" - ","_").replace(" ","_")+extension)
+            if not path: return
+            (export_excel if format_name=="xlsx" else export_pdf)(path,title,headers,rows)
+            messagebox.showinfo("Saber Accounting",f"Saved successfully:\n{path}")
+        except Exception as exc: messagebox.showerror("Saber Accounting",str(exc))
 
 def main(): SaberApp().mainloop()
 
