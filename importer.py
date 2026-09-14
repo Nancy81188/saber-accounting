@@ -63,13 +63,15 @@ def _detected_currencies(*values):
                 found.add(currency)
     return found
 
-def _currency(values, columns, default_currency):
+def _currency(values, columns, default_currency, number_formats=()):
     evidence_fields = ("currency", "subtotal", "vat", "total")
     evidence = []
     for field in evidence_fields:
         index = columns.get(field)
         if index is not None and index < len(values):
             evidence.append(values[index])
+        if index is not None and index < len(number_formats):
+            evidence.append(number_formats[index])
     found = _detected_currencies(*evidence)
     default = str(default_currency or "USD").strip().upper()
     if default not in SUPPORTED_CURRENCIES:
@@ -133,7 +135,7 @@ def read_invoices(path: str | Path, sheet_name: str | None = None, default_curre
         sheet = workbook_values[sheet_name] if sheet_name else workbook_values.worksheets[0]
         formula_sheet = workbook_formulas[sheet.title]
         value_rows = sheet.iter_rows(values_only=True)
-        formula_rows = formula_sheet.iter_rows(values_only=True)
+        formula_rows = formula_sheet.iter_rows()
         header = next(value_rows)
         next(formula_rows)
         columns = _columns(header)
@@ -142,9 +144,10 @@ def read_invoices(path: str | Path, sheet_name: str | None = None, default_curre
             missing = ", ".join(sorted(required - set(columns)))
             raise ValueError(f"Missing required columns: {missing}")
         invoices = []
-        for row_number, (values, formulas) in enumerate(zip(value_rows, formula_rows), start=2):
-            if not any(v not in (None, "") for v in formulas):
+        for row_number, (values, formula_cells) in enumerate(zip(value_rows, formula_rows), start=2):
+            if not any(cell.value not in (None, "") for cell in formula_cells):
                 continue
+            number_formats = tuple(cell.number_format or "" for cell in formula_cells)
             def get(field, default=None):
                 idx = columns.get(field)
                 return values[idx] if idx is not None and idx < len(values) else default
@@ -155,7 +158,7 @@ def read_invoices(path: str | Path, sheet_name: str | None = None, default_curre
                 total = subtotal + vat
             invoice_number = str(get("invoice_number") or row_number).strip()
             kind = str(get("kind") or default_kind).strip().lower()
-            currency, currency_issue = _currency(values, columns, default_currency)
+            currency, currency_issue = _currency(values, columns, default_currency, number_formats)
             invoices.append({
                 "invoice_number": invoice_number,
                 "invoice_date": _date(get("date")),
