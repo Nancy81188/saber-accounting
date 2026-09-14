@@ -73,6 +73,25 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertEqual(float(lines[1]["subtotal"]),90.0)
             self.assertEqual(float(lines[2]["vat"]),1.0)
 
+    def test_currency_detection_from_excel_number_formats(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "formatted-currencies.xlsx"
+            wb = Workbook(); ws = wb.active
+            ws.append(["Invoice Number","Date","Supplier Name","Total Before VAT","VAT","Total After VAT"])
+            formats = [
+                ("USD-FMT", '"$"#,##0.00'),
+                ("EUR-FMT", '€#,##0.00'),
+                ("LBP-FMT", '#,##0.00 "L.L."'),
+                ("AED-FMT", '#,##0.00 "AED"'),
+            ]
+            for invoice_number, number_format in formats:
+                ws.append([invoice_number,"14-09-2026","Supplier",100,11,111])
+                for column in (4,5,6):
+                    ws.cell(ws.max_row,column).number_format=number_format
+            wb.save(path)
+            rows=read_invoices(path)
+            self.assertEqual([row["currency"] for row in rows],["USD","EUR","LBP","AED"])
+
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:
             rows=[["purchase","USD",2,300,33,333]]; headers=["Type","Currency","Invoices","Before VAT","VAT","Total"]
