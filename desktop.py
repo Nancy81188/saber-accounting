@@ -20,6 +20,7 @@ class SaberApp(tk.Tk):
         self.language = tk.StringVar(value="en")
         self.client = None
         self.import_rows = []
+        self.view_currency = tk.StringVar(value="All Currencies")
         self._style()
         self.login_screen()
 
@@ -66,7 +67,14 @@ class SaberApp(tk.Tk):
         notebook=ttk.Notebook(self); notebook.pack(fill="both",expand=True,padx=18,pady=16)
         self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT)
         notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.trial_tab,text="Trial Balance")
+        filter_bar=tk.Frame(self,bg=LIGHT); filter_bar.pack(fill="x",padx=28)
+        tk.Label(filter_bar,text="Show currency:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
+        currency_filter=ttk.Combobox(filter_bar,textvariable=self.view_currency,values=["All Currencies","USD","EUR","LBP","AED"],state="readonly",width=16)
+        currency_filter.pack(side="left",padx=8); currency_filter.bind("<<ComboboxSelected>>",lambda _event:self.currency_changed())
         self.build_dashboard(); self.build_invoices(); self.build_import(); self.build_trial()
+
+    def currency_changed(self):
+        self.load_dashboard(); self.load_invoices(); self.load_trial()
 
     def table(self,parent,columns):
         frame=tk.Frame(parent,bg=LIGHT); frame.pack(fill="both",expand=True,padx=10,pady=10)
@@ -88,18 +96,22 @@ class SaberApp(tk.Tk):
     def load_dashboard(self):
         try: rows=self.client.dashboard()
         except Exception as exc: return messagebox.showerror("Error",str(exc))
+        selected=self.view_currency.get()
+        rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
         self.dashboard_rows=rows; self.dashboard_tree.delete(*self.dashboard_tree.get_children())
         for r in rows: self.dashboard_tree.insert("", "end", values=(r["kind"],r["currency"],r["count"],f'{r["subtotal"]:,.2f}',f'{r["vat"]:,.2f}',f'{r["total"]:,.2f}'))
 
     def build_invoices(self):
-        l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),110),("date",tr(l,"date"),110),("party",tr(l,"party"),260),("kind","Type",90),("currency",tr(l,"currency"),80),("subtotal",tr(l,"before_vat"),120),("vat",tr(l,"vat"),100),("total",tr(l,"total"),120),("row",tr(l,"source_row"),90)])
+        l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),110),("date",tr(l,"date"),110),("party",tr(l,"party"),230),("kind","Type",80),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),110),("vat",tr(l,"vat"),90),("total",tr(l,"total"),110),("status","Status",90),("row",tr(l,"source_row"),75)])
         tk.Button(self.invoices_tab,text=tr(l,"refresh"),command=self.load_invoices,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(pady=(0,10)); self.load_invoices()
 
     def load_invoices(self):
         try: rows=self.client.invoices()
         except Exception as exc: return messagebox.showerror("Error",str(exc))
+        selected=self.view_currency.get()
+        rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
         self.invoice_tree.delete(*self.invoice_tree.get_children())
-        for r in rows: self.invoice_tree.insert("","end",values=(r["invoice_number"],r["invoice_date"],r["party_name"],r["kind"],r["currency"],r["subtotal"],r["vat"],r["total"],r["source_row"]))
+        for r in rows: self.invoice_tree.insert("","end",values=(r["invoice_number"],r["invoice_date"],r["party_name"],r["kind"],r["currency"],r["subtotal"],r["vat"],r["total"],r["status"],r["source_row"]))
 
     def build_import(self):
         l=self.language.get(); controls=tk.Frame(self.import_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=10)
@@ -107,7 +119,7 @@ class SaberApp(tk.Tk):
         self.currency=tk.StringVar(value="USD"); ttk.Combobox(controls,textvariable=self.currency,values=["USD","LBP","EUR","AED"],state="readonly",width=8).pack(side="right",padx=6)
         self.kind=tk.StringVar(value="purchase"); ttk.Combobox(controls,textvariable=self.kind,values=["purchase","sale"],state="readonly",width=10).pack(side="right",padx=6)
         tk.Button(controls,text=tr(l,"choose_file"),command=self.choose_import,bg=NAVY,fg="white",border=0,padx=16,pady=7).pack(side="right")
-        self.import_tree=self.table(self.import_tab,[("no",tr(l,"invoice_no"),100),("row",tr(l,"source_row"),90),("date",tr(l,"date"),110),("party",tr(l,"party"),260),("subtotal",tr(l,"before_vat"),120),("vat",tr(l,"vat"),100),("total",tr(l,"total"),120)])
+        self.import_tree=self.table(self.import_tab,[("no",tr(l,"invoice_no"),90),("row",tr(l,"source_row"),70),("date",tr(l,"date"),100),("party",tr(l,"party"),220),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),105),("vat",tr(l,"vat"),85),("total",tr(l,"total"),105),("review","Currency Review",180)])
         self.import_status=tk.Label(self.import_tab,text="",bg=LIGHT); self.import_status.pack()
         tk.Button(self.import_tab,text=tr(l,"send"),command=self.send_import,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=22,pady=8).pack(pady=10)
 
@@ -117,7 +129,7 @@ class SaberApp(tk.Tk):
         try: self.import_rows=read_invoices(path,default_currency=self.currency.get(),default_kind=self.kind.get())
         except Exception as exc: return messagebox.showerror("Import",str(exc))
         self.file_label.config(text=path); self.import_tree.delete(*self.import_tree.get_children())
-        for r in self.import_rows[:1000]: self.import_tree.insert("","end",values=(r["invoice_number"],r["source_row"],r["invoice_date"],r["party_name"],r["subtotal"],r["vat"],r["total"]))
+        for r in self.import_rows[:1000]: self.import_tree.insert("","end",values=(r["invoice_number"],r["source_row"],r["invoice_date"],r["party_name"],r["currency"],r["subtotal"],r["vat"],r["total"],r["currency_issue"]))
         self.import_status.config(text=f'{len(self.import_rows)} {tr(self.language.get(),"rows_ready")}')
 
     def send_import(self):
@@ -130,7 +142,7 @@ class SaberApp(tk.Tk):
         self.load_dashboard(); self.load_invoices()
 
     def build_trial(self):
-        self.trial_tree=self.table(self.trial_tab,[("code","Account",110),("name","Name",280),("debit","Debit",150),("credit","Credit",150),("balance","Balance",160)])
+        self.trial_tree=self.table(self.trial_tab,[("currency","Currency",90),("code","Account",110),("name","Name",280),("debit","Debit",150),("credit","Credit",150),("balance","Balance",160)])
         actions=tk.Frame(self.trial_tab,bg=LIGHT); actions.pack(pady=(0,10))
         self.action_button(actions,tr(self.language.get(),"refresh"),self.load_trial).pack(side="left",padx=4)
         self.action_button(actions,"Export Excel",lambda:self.export_report("trial","xlsx")).pack(side="left",padx=4)
@@ -140,8 +152,10 @@ class SaberApp(tk.Tk):
     def load_trial(self):
         try: rows=self.client.trial_balance()
         except Exception as exc: return messagebox.showerror("Error",str(exc))
+        selected=self.view_currency.get()
+        rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
         self.trial_rows=rows; self.trial_tree.delete(*self.trial_tree.get_children())
-        for r in rows: self.trial_tree.insert("","end",values=(r["code"],r["name_en"],f'{r["debit"] or 0:,.2f}',f'{r["credit"] or 0:,.2f}',f'{r["balance"] or 0:,.2f}'))
+        for r in rows: self.trial_tree.insert("","end",values=(r["currency"],r["code"],r["name_en"],f'{r["debit"] or 0:,.2f}',f'{r["credit"] or 0:,.2f}',f'{r["balance"] or 0:,.2f}'))
 
     def action_button(self,parent,text,command):
         return tk.Button(parent,text=text,command=command,bg=NAVY,fg="white",border=0,padx=15,pady=7)
@@ -151,9 +165,9 @@ class SaberApp(tk.Tk):
             title="Saber Accounting - Dashboard"; headers=["Type","Currency","Invoices","Before VAT","VAT","Total"]
             rows=[[r["kind"],r["currency"],r["count"],r["subtotal"],r["vat"],r["total"]] for r in getattr(self,"dashboard_rows",[])]
         else:
-            title="Saber Accounting - Trial Balance"; headers=["Account","Name","Debit","Credit","Balance"]
-            rows=[[r["code"],r["name_en"],r["debit"] or 0,r["credit"] or 0,r["balance"] or 0] for r in getattr(self,"trial_rows",[])]
-            rows.append(["","TOTAL",sum(float(r[2]) for r in rows),sum(float(r[3]) for r in rows),sum(float(r[4]) for r in rows)])
+            title="Saber Accounting - Trial Balance"; headers=["Currency","Account","Name","Debit","Credit","Balance"]
+            rows=[[r["currency"],r["code"],r["name_en"],r["debit"] or 0,r["credit"] or 0,r["balance"] or 0] for r in getattr(self,"trial_rows",[])]
+            rows.append(["","","TOTAL",sum(float(r[3]) for r in rows),sum(float(r[4]) for r in rows),sum(float(r[5]) for r in rows)])
         if not rows: return messagebox.showwarning("Saber Accounting","No report data to export")
         try:
             if format_name == "print": print_rows(title,headers,rows); return

@@ -25,6 +25,32 @@ class SaberAccountingTest(unittest.TestCase):
             tb=db.trial_balance()
             self.assertAlmostEqual(sum(float(r["debit"] or 0) for r in tb),sum(float(r["credit"] or 0) for r in tb),places=2)
 
+    def test_currency_detection_defaults_conflicts_and_separation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "currencies.xlsx"
+            wb = Workbook(); ws = wb.active
+            ws.append(["Invoice Number","Date","Supplier Name","Total Before VAT","VAT","Total After VAT","Currency"])
+            ws.append(["USD-1","01-09-2026","A","$100","$11","$111",None])
+            ws.append(["EUR-1","02-09-2026","B","€200","€22","€222",None])
+            ws.append(["LBP-1","03-09-2026","C","300 L.L.","33 L.L.","333 L.L.",None])
+            ws.append(["AED-1","04-09-2026","D","AED 400","AED 44","AED 444",None])
+            ws.append(["DEFAULT-1","05-09-2026","E",500,55,555,None])
+            ws.append(["CONFLICT-1","06-09-2026","F","$600","$66","$666","EUR"])
+            wb.save(path)
+            rows = read_invoices(path)
+            self.assertEqual([r["currency"] for r in rows[:5]], ["USD","EUR","LBP","AED","USD"])
+            self.assertEqual(rows[4]["currency_issue"], "missing_defaulted_to_usd")
+            self.assertTrue(rows[5]["currency_issue"].startswith("conflicting:"))
+
+            db=Database(Path(folder)/"currency.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            for row in rows: db.import_invoice(row,user["id"])
+            self.assertEqual({r["currency"] for r in db.dashboard()}, {"USD","EUR","LBP","AED"})
+            trial=db.trial_balance()
+            self.assertEqual({r["currency"] for r in trial}, {"USD","EUR","LBP","AED"})
+            conflict=next(r for r in db.list_invoices() if r["invoice_number"]=="CONFLICT-1")
+            self.assertEqual(conflict["status"], "review")
+
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:
             rows=[["purchase","USD",2,300,33,333]]; headers=["Type","Currency","Invoices","Before VAT","VAT","Total"]
