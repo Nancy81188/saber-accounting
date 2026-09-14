@@ -98,7 +98,7 @@ def main():
     parser = argparse.ArgumentParser(description="Saber Accounting shared server")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--database", default=str(Path.home() / "SaberAccounting" / "saber_accounting.db"))
+    parser.add_argument("--database", default=str(Path.home() / "SaberAccounting" / "saber_accounting_v0_7.db"))
     parser.add_argument("--admin-password", default="ChangeMe123!")
     args = parser.parse_args()
     Path(args.database).parent.mkdir(parents=True, exist_ok=True)
