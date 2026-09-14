@@ -1,0 +1,42 @@
+name: Build Saber Accounting Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install build requirements
+        run: python -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest -v test_saber_accounting.py
+
+      - name: Build standalone applications
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name SaberAccounting run_desktop.py
+          pyinstaller --noconfirm --clean --onefile --name SaberAccountingServer run_server.py
+
+      - name: Create Windows installer
+        run: iscc installer.iss
+
+      - name: Upload clickable installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: SaberAccountingSetup
+          path: installer-output/SaberAccountingSetup.exe
+          if-no-files-found: error
