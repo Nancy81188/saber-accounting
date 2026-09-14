@@ -200,7 +200,11 @@ class Database:
                 raise ValueError(f"Item {index}: invalid quantity, price, or VAT rate") from exc
             if quantity <= 0 or unit_price < 0 or vat_rate < 0:
                 raise ValueError(f"Item {index}: values cannot be negative and quantity must be above zero")
-            subtotal = (quantity * unit_price).quantize(Decimal("0.01"))
+            calculated_subtotal = (quantity * unit_price).quantize(Decimal("0.01"))
+            supplied_subtotal = line.get("subtotal")
+            subtotal = calculated_subtotal if supplied_subtotal in (None, "") else Decimal(str(supplied_subtotal)).quantize(Decimal("0.01"))
+            if subtotal < 0:
+                raise ValueError(f"Item {index}: total before VAT cannot be negative")
             supplied_vat = line.get("vat")
             vat = (subtotal * vat_rate / Decimal("100")).quantize(Decimal("0.01")) if supplied_vat in (None, "") else Decimal(str(supplied_vat)).quantize(Decimal("0.01"))
             if vat < 0:
