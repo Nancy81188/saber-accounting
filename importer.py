@@ -64,31 +64,52 @@ def _detected_currencies(*values):
     return found
 
 def _currency(values, columns, default_currency, number_formats=()):
-    evidence_fields = ("currency", "subtotal", "vat", "total")
-    evidence = []
-    for field in evidence_fields:
-        index = columns.get(field)
-        if index is not None and index < len(values):
-            evidence.append(values[index])
-        if index is not None and index < len(number_formats):
-            evidence.append(number_formats[index])
-    found = _detected_currencies(*evidence)
     default = str(default_currency or "USD").strip().upper()
     if default not in SUPPORTED_CURRENCIES:
         default = "USD"
 
     currency_cell = ""
-    index = columns.get("currency")
-    if index is not None and index < len(values):
-        currency_cell = str(values[index] or "").strip()
+    currency_index = columns.get("currency")
+    if currency_index is not None and currency_index < len(values):
+        currency_cell = str(values[currency_index] or "").strip()
     explicit = _detected_currencies(currency_cell)
+    if len(explicit) > 1:
+        selected = next(code for code in SUPPORTED_CURRENCIES if code in explicit)
+        return selected, "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in explicit)
 
-    if len(found) > 1:
-        selected = next(iter(explicit), None) if len(explicit) == 1 else None
-        selected = selected or next(code for code in SUPPORTED_CURRENCIES if code in found)
-        return selected, "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in found)
+    votes = {code: 0 for code in SUPPORTED_CURRENCIES}
+    field_currencies = {}
+    for field in ("subtotal", "vat", "total"):
+        index = columns.get(field)
+        if index is None or index >= len(values) or values[index] in (None, ""):
+            continue
+        evidence = [values[index]]
+        if index < len(number_formats):
+            evidence.append(number_formats[index])
+        detected = _detected_currencies(*evidence)
+        field_currencies[field] = detected
+        for code in detected:
+            votes[code] += 1
+
+    found = {code for code, count in votes.items() if count}
+    if len(explicit) == 1:
+        selected = next(iter(explicit))
+        combined = found | explicit
+        issue = "" if len(combined) <= 1 else "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in combined)
+        return selected, issue
     if len(found) == 1:
         return next(iter(found)), ""
+    if len(found) > 1:
+        highest = max(votes.values())
+        candidates = {code for code, count in votes.items() if count == highest}
+        selected = None
+        for field in ("total", "subtotal", "vat"):
+            detected = field_currencies.get(field, set()) & candidates
+            if len(detected) == 1:
+                selected = next(iter(detected))
+                break
+        selected = selected or next(code for code in SUPPORTED_CURRENCIES if code in candidates)
+        return selected, "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in found)
     if currency_cell:
         return default, "unsupported:" + currency_cell
     return default, "missing_defaulted_to_" + default.lower()
