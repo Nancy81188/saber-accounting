@@ -51,6 +51,28 @@ class SaberAccountingTest(unittest.TestCase):
             conflict=next(r for r in db.list_invoices() if r["invoice_number"]=="CONFLICT-1")
             self.assertEqual(conflict["status"], "review")
 
+    def test_manual_invoice_items_editable_subtotal_and_vat(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"manual.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            invoice={"invoice_number":"M-1","invoice_date":"14-09-2026","party_name":"Manual Supplier",
+                     "kind":"purchase","currency":"USD","source_file":"Manual Entry"}
+            items=[
+                {"description":"Automatic VAT","quantity":2,"unit_price":50,"vat_rate":11},
+                {"description":"Edited subtotal","quantity":1,"unit_price":100,"subtotal":90,"vat_rate":5},
+                {"description":"Edited VAT","quantity":1,"unit_price":20,"vat_rate":11,"vat":1},
+            ]
+            invoice_id=db.create_manual_invoice(invoice,items,user["id"])
+            saved=next(row for row in db.list_invoices() if row["id"]==invoice_id)
+            self.assertEqual(float(saved["subtotal"]),210.0)
+            self.assertEqual(float(saved["vat"]),16.5)
+            self.assertEqual(float(saved["total"]),226.5)
+            with db.connect() as connection:
+                lines=connection.execute("SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY id",(invoice_id,)).fetchall()
+            self.assertEqual(len(lines),3)
+            self.assertEqual(float(lines[1]["subtotal"]),90.0)
+            self.assertEqual(float(lines[2]["vat"]),1.0)
+
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:
             rows=[["purchase","USD",2,300,33,333]]; headers=["Type","Currency","Invoices","Before VAT","VAT","Total"]
