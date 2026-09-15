@@ -19,6 +19,9 @@ ALIASES = {
     "total": {"total after vat", "total", "grand total", "بعد الضريبة", "ttc"},
     "currency": {"currency", "curr", "العملة", "devise"},
     "kind": {"type", "invoice type", "نوع", "nature"},
+    "supplier_account": {"supplier account number", "supplier account", "supplier account no", "supplier a/c", "حساب المورد", "compte fournisseur"},
+    "vat_account": {"vat account number", "vat account", "vat account no", "vat a/c", "حساب الضريبة", "compte tva"},
+    "expense_account": {"expense account number", "expense account", "expense account no", "expense a/c", "classification number", "حساب المصروف", "compte charge"},
 }
 
 _CURRENCY_PATTERNS = {
@@ -205,6 +208,9 @@ def read_invoices(path: str | Path, sheet_name: str | None = None, default_curre
                 "currency": currency,
                 "currency_issue": currency_issue,
                 "kind": "sale" if kind in {"sale", "sales", "customer"} else "purchase",
+                "supplier_account": str(get("supplier_account") or "2100").strip(),
+                "vat_account": str(get("vat_account") or "1300").strip(),
+                "expense_account": str(get("expense_account") or "5100").strip(),
                 "source_file": Path(path).name,
                 "source_row": row_number,
             })
