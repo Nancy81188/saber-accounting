@@ -36,9 +36,12 @@ class SaberAccountingTest(unittest.TestCase):
             ws.append(["AED-1","04-09-2026","D","AED 400","AED 44","AED 444",None])
             ws.append(["DEFAULT-1","05-09-2026","E",500,55,555,None])
             ws.append(["CONFLICT-1","06-09-2026","F","$600","$66","$666","EUR"])
+            ws.append(["PRICE-WINS","07-09-2026","G","€700","€77","€777","USD"])
             wb.save(path)
             rows = read_invoices(path)
             self.assertEqual([r["currency"] for r in rows[:5]], ["USD","EUR","LBP","AED","USD"])
+            self.assertEqual(rows[6]["currency"], "EUR")
+            self.assertTrue(rows[6]["currency_issue"].startswith("conflicting:"))
             self.assertEqual(rows[4]["currency_issue"], "missing_defaulted_to_usd")
             self.assertTrue(rows[5]["currency_issue"].startswith("conflicting:"))
 
