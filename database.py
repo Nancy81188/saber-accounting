@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS accounts (
 CREATE TABLE IF NOT EXISTS invoices (
  id INTEGER PRIMARY KEY, invoice_number TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('sale','purchase')),
  invoice_date TEXT, party_id INTEGER REFERENCES parties(id), currency TEXT NOT NULL, exchange_rate TEXT NOT NULL DEFAULT '1',
- subtotal TEXT, vat TEXT, total TEXT, status TEXT NOT NULL DEFAULT 'posted', currency_issue TEXT NOT NULL DEFAULT '', source_file TEXT, source_row INTEGER,
+ subtotal TEXT, vat TEXT, total TEXT, status TEXT NOT NULL DEFAULT 'posted', currency_issue TEXT NOT NULL DEFAULT '',
+ supplier_account TEXT NOT NULL DEFAULT '2100', vat_account TEXT NOT NULL DEFAULT '1300', expense_account TEXT NOT NULL DEFAULT '5100',
+ source_file TEXT, source_row INTEGER,
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS invoice_items (
@@ -106,6 +108,17 @@ class Database:
             invoice_columns = {row["name"] for row in db.execute("PRAGMA table_info(invoices)")}
             if "currency_issue" not in invoice_columns:
                 db.execute("ALTER TABLE invoices ADD COLUMN currency_issue TEXT NOT NULL DEFAULT ''")
+            account_columns = {
+                "supplier_account": "2100",
+                "vat_account": "1300",
+                "expense_account": "5100",
+            }
+            for column, default_code in account_columns.items():
+                if column not in invoice_columns:
+                    db.execute(
+                        f"ALTER TABLE invoices ADD COLUMN {column} "
+                        f"TEXT NOT NULL DEFAULT '{default_code}'"
+                    )
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
             db.executemany("INSERT OR IGNORE INTO accounts(code,name_en,name_ar,name_fr,type) VALUES(?,?,?,?,?)", DEFAULT_ACCOUNTS)
 
@@ -156,11 +169,25 @@ class Database:
             subtotal = Decimal(str(item.get("subtotal") or 0)); vat = Decimal(str(item.get("vat") or 0)); total = Decimal(str(item.get("total") or subtotal + vat))
             currency_issue = str(item.get("currency_issue") or "")
             status = "posted" if total == subtotal + vat and not currency_issue.startswith(("conflicting:", "unsupported:")) else "review"
-            cur = db.execute("""INSERT INTO invoices(invoice_number,kind,invoice_date,party_id,currency,exchange_rate,subtotal,vat,total,status,currency_issue,source_file,source_row,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            supplier_account = str(item.get("supplier_account") or "2100").strip()
+            vat_account = str(item.get("vat_account") or "1300").strip()
+            expense_account = str(item.get("expense_account") or "5100").strip()
+            account_definitions = [
+                (supplier_account, "Supplier Account", "liability"),
+                (vat_account, "VAT Account", "asset"),
+                (expense_account, "Expense Account", "expense"),
+            ]
+            for code, name, account_type in account_definitions:
+                db.execute(
+                    "INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",
+                    (code, name, account_type),
+                )
+            cur = db.execute("""INSERT INTO invoices(invoice_number,kind,invoice_date,party_id,currency,exchange_rate,subtotal,vat,total,status,currency_issue,supplier_account,vat_account,expense_account,source_file,source_row,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 str(item["invoice_number"]), item["kind"], item.get("invoice_date"), party["id"], item.get("currency", "USD"),
                 str(item.get("exchange_rate", 1)), str(item.get("subtotal") or 0), str(item.get("vat") or 0), str(item.get("total") or 0),
-                status, currency_issue, item.get("source_file"), item.get("source_row"), user_id, utcnow()))
+                status, currency_issue, supplier_account, vat_account, expense_account,
+                item.get("source_file"), item.get("source_row"), user_id, utcnow()))
             invoice_id = cur.lastrowid
             entry_number = f"INV-{invoice_id}"
             entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -168,7 +195,7 @@ class Database:
             if item["kind"] == "sale":
                 lines = [("1100", total, 0), ("4100", 0, subtotal), ("2200", 0, vat)]
             else:
-                lines = [("5100", subtotal, 0), ("1300", vat, 0), ("2100", 0, total)]
+                lines = [(expense_account, subtotal, 0), (vat_account, vat, 0), (supplier_account, 0, total)]
             difference = sum(x[1] for x in lines) - sum(x[2] for x in lines)
             if difference > 0:
                 lines.append(("9999", 0, difference))
@@ -230,7 +257,7 @@ class Database:
 
     def list_invoices(self, limit=500):
         with self.connect() as db:
-            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.source_row
+            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row
                 FROM invoices i LEFT JOIN parties p ON p.id=i.party_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
 
     def dashboard(self):
