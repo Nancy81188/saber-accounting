@@ -246,7 +246,7 @@ class SaberApp(tk.Tk):
         tk.Label(controls,text="Show:",bg=LIGHT).pack(side="right")
         self.kind=tk.StringVar(value="purchase"); ttk.Combobox(controls,textvariable=self.kind,values=["purchase","sale"],state="readonly",width=10).pack(side="right",padx=6)
         tk.Button(controls,text=tr(l,"choose_file"),command=self.choose_import,bg=NAVY,fg="white",border=0,padx=16,pady=7).pack(side="right")
-        self.import_tree=self.table(self.import_tab,[("no",tr(l,"invoice_no"),90),("row",tr(l,"source_row"),70),("date",tr(l,"date"),100),("party",tr(l,"party"),220),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),105),("vat",tr(l,"vat"),85),("total",tr(l,"total"),105),("review","Currency Review",180)])
+        self.import_tree=self.table(self.import_tab,[("no",tr(l,"invoice_no"),90),("row",tr(l,"source_row"),70),("date",tr(l,"date"),100),("party",tr(l,"party"),220),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),105),("vat",tr(l,"vat"),85),("total",tr(l,"total"),105)])
         self.import_status=tk.Label(self.import_tab,text="",bg=LIGHT); self.import_status.pack()
         tk.Button(self.import_tab,text=tr(l,"send"),command=self.send_import,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=22,pady=8).pack(pady=10)
 
@@ -262,7 +262,7 @@ class SaberApp(tk.Tk):
         selected=self.import_view_currency.get()
         rows=[r for r in self.import_rows if selected=="All Currencies" or r["currency"]==selected]
         for r in rows[:1000]:
-            self.import_tree.insert("","end",values=(r["invoice_number"],r["source_row"],r["invoice_date"],r["party_name"],r["currency"],r["subtotal"],r["vat"],r["total"],r["currency_issue"]))
+            self.import_tree.insert("","end",values=(r["invoice_number"],r["source_row"],r["invoice_date"],r["party_name"],r["currency"],r["subtotal"],r["vat"],r["total"]))
         self.import_status.config(text=f'{len(rows)} {tr(self.language.get(),"rows_ready")} ({selected})')
 
     def send_import(self):
