@@ -54,6 +54,37 @@ class SaberAccountingTest(unittest.TestCase):
             conflict=next(r for r in db.list_invoices() if r["invoice_number"]=="CONFLICT-1")
             self.assertEqual(conflict["status"], "posted")
 
+    def test_account_numbers_import_and_journal_posting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "accounts.xlsx"
+            wb = Workbook(); ws = wb.active
+            ws.append([
+                "Invoice Number", "Date", "Supplier Name",
+                "Total Before VAT", "VAT", "Total After VAT",
+                "Supplier Account Number", "VAT Account Number",
+                "Expense Account Number",
+            ])
+            ws.append([
+                "ACC-1", "15-09-2026", "Supplier", "$100", "$11", "$111",
+                "2110", "1310", "5110",
+            ])
+            wb.save(path)
+            invoice = read_invoices(path)[0]
+            self.assertEqual(invoice["supplier_account"], "2110")
+            self.assertEqual(invoice["vat_account"], "1310")
+            self.assertEqual(invoice["expense_account"], "5110")
+
+            db = Database(Path(folder) / "accounts.db")
+            db.initialize("secret")
+            user = db.user_for_token(db.login("admin", "secret")["token"])
+            db.import_invoice(invoice, user["id"])
+            saved = db.list_invoices()[0]
+            self.assertEqual(saved["supplier_account"], "2110")
+            self.assertEqual(saved["vat_account"], "1310")
+            self.assertEqual(saved["expense_account"], "5110")
+            trial_codes = {row["code"] for row in db.trial_balance()}
+            self.assertTrue({"2110", "1310", "5110"}.issubset(trial_codes))
+
     def test_manual_invoice_items_editable_subtotal_and_vat(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"manual.db"); db.initialize("secret")
