@@ -41,9 +41,9 @@ class SaberAccountingTest(unittest.TestCase):
             rows = read_invoices(path)
             self.assertEqual([r["currency"] for r in rows[:5]], ["USD","EUR","LBP","AED","USD"])
             self.assertEqual(rows[6]["currency"], "EUR")
-            self.assertTrue(rows[6]["currency_issue"].startswith("conflicting:"))
+            self.assertEqual(rows[6]["currency_issue"], "")
             self.assertEqual(rows[4]["currency_issue"], "missing_defaulted_to_usd")
-            self.assertTrue(rows[5]["currency_issue"].startswith("conflicting:"))
+            self.assertEqual(rows[5]["currency_issue"], "")
 
             db=Database(Path(folder)/"currency.db"); db.initialize("secret")
             user=db.user_for_token(db.login("admin","secret")["token"])
@@ -103,7 +103,7 @@ class SaberAccountingTest(unittest.TestCase):
             rows=read_invoices(path)
             self.assertEqual([row["currency"] for row in rows],["USD","EUR","LBP","AED","EUR","EUR"])
             self.assertNotIn("conflicting",rows[4]["currency_issue"])
-            self.assertTrue(rows[5]["currency_issue"].startswith("conflicting:"))
+            self.assertEqual(rows[5]["currency_issue"], "")
 
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:
