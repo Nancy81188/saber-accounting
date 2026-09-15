@@ -105,7 +105,7 @@ class SaberApp(tk.Tk):
         for r in rows: self.dashboard_tree.insert("", "end", values=(r["kind"],r["currency"],r["count"],f'{r["subtotal"]:,.2f}',f'{r["vat"]:,.2f}',f'{r["total"]:,.2f}'))
 
     def build_invoices(self):
-        l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),110),("date",tr(l,"date"),110),("party",tr(l,"party"),230),("kind","Type",80),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),110),("vat",tr(l,"vat"),90),("total",tr(l,"total"),110),("status","Status",90),("row",tr(l,"source_row"),75)])
+        l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),110),("date",tr(l,"date"),110),("party",tr(l,"party"),230),("kind","Type",80),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),110),("vat",tr(l,"vat"),90),("total",tr(l,"total"),110),("supplier_account","Supplier A/C",90),("vat_account","VAT A/C",80),("expense_account","Expense A/C",90),("status","Status",90),("row",tr(l,"source_row"),75)])
         tk.Button(self.invoices_tab,text=tr(l,"refresh"),command=self.load_invoices,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(pady=(0,10)); self.load_invoices()
 
     def load_invoices(self):
@@ -114,19 +114,30 @@ class SaberApp(tk.Tk):
         selected=self.view_currency.get()
         rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
         self.invoice_tree.delete(*self.invoice_tree.get_children())
-        for r in rows: self.invoice_tree.insert("","end",values=(r["invoice_number"],r["invoice_date"],r["party_name"],r["kind"],r["currency"],r["subtotal"],r["vat"],r["total"],r["status"],r["source_row"]))
+        for r in rows: self.invoice_tree.insert("","end",values=(r["invoice_number"],r["invoice_date"],r["party_name"],r["kind"],r["currency"],r["subtotal"],r["vat"],r["total"],r["supplier_account"],r["vat_account"],r["expense_account"],r["status"],r["source_row"]))
 
     def build_manual(self):
         header=tk.LabelFrame(self.manual_tab,text="Invoice Details",bg=LIGHT,padx=10,pady=8)
         header.pack(fill="x",padx=10,pady=(10,4))
         self.manual_no=tk.StringVar(); self.manual_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y"))
         self.manual_party=tk.StringVar(); self.manual_kind=tk.StringVar(value="purchase"); self.manual_currency=tk.StringVar(value="USD")
+        self.manual_supplier_account=tk.StringVar(value="2100")
+        self.manual_vat_account=tk.StringVar(value="1300")
+        self.manual_expense_account=tk.StringVar(value="5100")
         fields=[("Invoice Number",self.manual_no,16),("Date",self.manual_date,14),("Customer / Supplier",self.manual_party,28)]
         for col,(label,var,width) in enumerate(fields):
             tk.Label(header,text=label,bg=LIGHT).grid(row=0,column=col*2,sticky="w",padx=4)
             tk.Entry(header,textvariable=var,width=width).grid(row=0,column=col*2+1,padx=4)
         ttk.Combobox(header,textvariable=self.manual_kind,values=["purchase","sale"],state="readonly",width=10).grid(row=0,column=6,padx=5)
         ttk.Combobox(header,textvariable=self.manual_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=8).grid(row=0,column=7,padx=5)
+        account_fields=[
+            ("Supplier Account",self.manual_supplier_account),
+            ("VAT Account",self.manual_vat_account),
+            ("Expense Account",self.manual_expense_account),
+        ]
+        for col,(label,var) in enumerate(account_fields):
+            tk.Label(header,text=label,bg=LIGHT).grid(row=1,column=col*2,sticky="w",padx=4,pady=(10,2))
+            tk.Entry(header,textvariable=var,width=16).grid(row=1,column=col*2+1,padx=4,pady=(10,2))
 
         editor=tk.LabelFrame(self.manual_tab,text="Add Invoice Item",bg=LIGHT,padx=10,pady=8)
         editor.pack(fill="x",padx=10,pady=4)
@@ -224,6 +235,9 @@ class SaberApp(tk.Tk):
     def save_manual_invoice(self):
         invoice={"invoice_number":self.manual_no.get().strip(),"invoice_date":self.manual_date.get().strip(),
                  "party_name":self.manual_party.get().strip(),"kind":self.manual_kind.get(),"currency":self.manual_currency.get(),
+                 "supplier_account":self.manual_supplier_account.get().strip() or "2100",
+                 "vat_account":self.manual_vat_account.get().strip() or "1300",
+                 "expense_account":self.manual_expense_account.get().strip() or "5100",
                  "source_file":"Manual Entry","source_row":None}
         if not all((invoice["invoice_number"],invoice["invoice_date"],invoice["party_name"])):
             return messagebox.showwarning("Manual Entry","Enter invoice number, date, and customer/supplier")
@@ -246,7 +260,7 @@ class SaberApp(tk.Tk):
         tk.Label(controls,text="Show:",bg=LIGHT).pack(side="right")
         self.kind=tk.StringVar(value="purchase"); ttk.Combobox(controls,textvariable=self.kind,values=["purchase","sale"],state="readonly",width=10).pack(side="right",padx=6)
         tk.Button(controls,text=tr(l,"choose_file"),command=self.choose_import,bg=NAVY,fg="white",border=0,padx=16,pady=7).pack(side="right")
-        self.import_tree=self.table(self.import_tab,[("no",tr(l,"invoice_no"),90),("row",tr(l,"source_row"),70),("date",tr(l,"date"),100),("party",tr(l,"party"),220),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),105),("vat",tr(l,"vat"),85),("total",tr(l,"total"),105)])
+        self.import_tree=self.table(self.import_tab,[("no",tr(l,"invoice_no"),90),("row",tr(l,"source_row"),70),("date",tr(l,"date"),100),("party",tr(l,"party"),220),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),105),("vat",tr(l,"vat"),85),("total",tr(l,"total"),105),("supplier_account","Supplier A/C",90),("vat_account","VAT A/C",80),("expense_account","Expense A/C",90)])
         self.import_status=tk.Label(self.import_tab,text="",bg=LIGHT); self.import_status.pack()
         tk.Button(self.import_tab,text=tr(l,"send"),command=self.send_import,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=22,pady=8).pack(pady=10)
 
@@ -262,7 +276,7 @@ class SaberApp(tk.Tk):
         selected=self.import_view_currency.get()
         rows=[r for r in self.import_rows if selected=="All Currencies" or r["currency"]==selected]
         for r in rows[:1000]:
-            self.import_tree.insert("","end",values=(r["invoice_number"],r["source_row"],r["invoice_date"],r["party_name"],r["currency"],r["subtotal"],r["vat"],r["total"]))
+            self.import_tree.insert("","end",values=(r["invoice_number"],r["source_row"],r["invoice_date"],r["party_name"],r["currency"],r["subtotal"],r["vat"],r["total"],r["supplier_account"],r["vat_account"],r["expense_account"]))
         self.import_status.config(text=f'{len(rows)} {tr(self.language.get(),"rows_ready")} ({selected})')
 
     def send_import(self):
