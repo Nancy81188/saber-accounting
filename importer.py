@@ -105,27 +105,26 @@ def _currency(values, columns, default_currency, number_formats=()):
                 selected = next(iter(detected))
                 break
 
-        selected = selected or next(
-            code for code in SUPPORTED_CURRENCIES if code in candidates
-        )
-        combined = found | explicit
-        issue = ""
-        if len(combined) > 1:
-            issue = "conflicting:" + ",".join(
-                code for code in SUPPORTED_CURRENCIES if code in combined
-            )
-        return selected, issue
+        if selected is None:
+            non_default = [
+                code for code in ("EUR", "LBP", "AED")
+                if code in candidates
+            ]
+            selected = non_default[0] if non_default else "USD"
+
+        # Currency formatting conflicts are resolved automatically so the row
+        # appears only in the selected currency view.
+        return selected, ""
 
     # Only consult a separate Currency cell when prices contain no evidence.
     if len(explicit) == 1:
         return next(iter(explicit)), ""
     if len(explicit) > 1:
         selected = next(
-            code for code in SUPPORTED_CURRENCIES if code in explicit
+            (code for code in ("EUR", "LBP", "AED") if code in explicit),
+            "USD",
         )
-        return selected, "conflicting:" + ",".join(
-            code for code in SUPPORTED_CURRENCIES if code in explicit
-        )
+        return selected, ""
     if currency_cell:
         return default, "unsupported:" + currency_cell
     return default, "missing_defaulted_to_" + default.lower()
