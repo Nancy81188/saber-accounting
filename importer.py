@@ -64,6 +64,7 @@ def _detected_currencies(*values):
     return found
 
 def _currency(values, columns, default_currency, number_formats=()):
+    """Detect currency from price cells first, then use other evidence."""
     default = str(default_currency or "USD").strip().upper()
     if default not in SUPPORTED_CURRENCIES:
         default = "USD"
@@ -73,12 +74,11 @@ def _currency(values, columns, default_currency, number_formats=()):
     if currency_index is not None and currency_index < len(values):
         currency_cell = str(values[currency_index] or "").strip()
     explicit = _detected_currencies(currency_cell)
-    if len(explicit) > 1:
-        selected = next(code for code in SUPPORTED_CURRENCIES if code in explicit)
-        return selected, "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in explicit)
 
     votes = {code: 0 for code in SUPPORTED_CURRENCIES}
     field_currencies = {}
+
+    # The symbols/codes printed in monetary cells are the primary source.
     for field in ("subtotal", "vat", "total"):
         index = columns.get(field)
         if index is None or index >= len(values) or values[index] in (None, ""):
@@ -92,24 +92,40 @@ def _currency(values, columns, default_currency, number_formats=()):
             votes[code] += 1
 
     found = {code for code, count in votes.items() if count}
-    if len(explicit) == 1:
-        selected = next(iter(explicit))
-        combined = found | explicit
-        issue = "" if len(combined) <= 1 else "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in combined)
-        return selected, issue
-    if len(found) == 1:
-        return next(iter(found)), ""
-    if len(found) > 1:
+
+    if found:
         highest = max(votes.values())
         candidates = {code for code, count in votes.items() if count == highest}
         selected = None
+
+        # Prefer the final price, then subtotal, when votes are tied.
         for field in ("total", "subtotal", "vat"):
             detected = field_currencies.get(field, set()) & candidates
             if len(detected) == 1:
                 selected = next(iter(detected))
                 break
-        selected = selected or next(code for code in SUPPORTED_CURRENCIES if code in candidates)
-        return selected, "conflicting:" + ",".join(code for code in SUPPORTED_CURRENCIES if code in found)
+
+        selected = selected or next(
+            code for code in SUPPORTED_CURRENCIES if code in candidates
+        )
+        combined = found | explicit
+        issue = ""
+        if len(combined) > 1:
+            issue = "conflicting:" + ",".join(
+                code for code in SUPPORTED_CURRENCIES if code in combined
+            )
+        return selected, issue
+
+    # Only consult a separate Currency cell when prices contain no evidence.
+    if len(explicit) == 1:
+        return next(iter(explicit)), ""
+    if len(explicit) > 1:
+        selected = next(
+            code for code in SUPPORTED_CURRENCIES if code in explicit
+        )
+        return selected, "conflicting:" + ",".join(
+            code for code in SUPPORTED_CURRENCIES if code in explicit
+        )
     if currency_cell:
         return default, "unsupported:" + currency_cell
     return default, "missing_defaulted_to_" + default.lower()
