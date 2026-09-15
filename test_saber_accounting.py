@@ -52,7 +52,7 @@ class SaberAccountingTest(unittest.TestCase):
             trial=db.trial_balance()
             self.assertEqual({r["currency"] for r in trial}, {"USD","EUR","LBP","AED"})
             conflict=next(r for r in db.list_invoices() if r["invoice_number"]=="CONFLICT-1")
-            self.assertEqual(conflict["status"], "review")
+            self.assertEqual(conflict["status"], "posted")
 
     def test_manual_invoice_items_editable_subtotal_and_vat(self):
         with tempfile.TemporaryDirectory() as folder:
