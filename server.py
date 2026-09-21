@@ -41,6 +41,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "Unauthorized"})
         if path == "/api/invoices":
             return self._json(200, {"items": self.db.list_invoices()})
+        if path == "/api/accounts":
+            return self._json(200, {"items": self.db.list_accounts()})
         if path == "/api/dashboard":
             return self._json(200, {"items": self.db.dashboard()})
         if path == "/api/trial-balance":
