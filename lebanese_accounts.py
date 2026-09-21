@@ -4591,5 +4591,5 @@ DEFAULT_LEBANESE_ACCOUNTS = {
     "vat_payable": "4427",
     "purchases": "6011",
     "sales": "713",
-    "import_variance": "6888",
+    "import_variance": "6851.6",
 }
