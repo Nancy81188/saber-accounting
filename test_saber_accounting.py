@@ -4,6 +4,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from database import Database
 from importer import read_invoices
+from lebanese_accounts import LEBANESE_ACCOUNTS
 from report_export import export_excel, export_pdf
 
 class SaberAccountingTest(unittest.TestCase):
@@ -135,6 +136,23 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertEqual([row["currency"] for row in rows],["USD","EUR","LBP","AED","EUR","EUR"])
             self.assertNotIn("conflicting",rows[4]["currency_issue"])
             self.assertEqual(rows[5]["currency_issue"], "")
+
+    def test_full_lebanese_chart_and_default_posting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"lebanese.db"); db.initialize("secret")
+            accounts=db.list_accounts()
+            self.assertEqual(len(accounts),len(LEBANESE_ACCOUNTS))
+            codes={row["code"] for row in accounts}
+            self.assertTrue({"1","2","3","4","5","6","7","4011","4111","4426.6","4427","6011","713"}.issubset(codes))
+            self.assertFalse({"1100","2100","2200","1300","4100","5100","9999"} & codes)
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            purchase={"invoice_number":"LB-P","invoice_date":"21-09-2026","party_name":"Supplier",
+                      "kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111}
+            sale={"invoice_number":"LB-S","invoice_date":"21-09-2026","party_name":"Customer",
+                  "kind":"sale","currency":"USD","subtotal":200,"vat":22,"total":222}
+            db.import_invoice(purchase,user["id"]); db.import_invoice(sale,user["id"])
+            trial_codes={row["code"] for row in db.trial_balance()}
+            self.assertTrue({"4011","4111","4426.6","4427","6011","713"}.issubset(trial_codes))
 
     def test_update_specific_invoice_row(self):
         with tempfile.TemporaryDirectory() as folder:
