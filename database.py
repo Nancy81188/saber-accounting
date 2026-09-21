@@ -265,10 +265,24 @@ class Database:
             rows = db.execute("SELECT kind,currency,SUM(CAST(subtotal AS REAL)) subtotal,SUM(CAST(vat AS REAL)) vat,SUM(CAST(total AS REAL)) total,COUNT(*) count FROM invoices GROUP BY kind,currency").fetchall()
             return [dict(r) for r in rows]
 
-    def trial_balance(self):
+    def trial_balance(self, from_date=None, to_date=None):
+        conditions = []
+        parameters = []
+        normalized_date = """CASE
+            WHEN e.entry_date GLOB '??-??-????'
+                THEN substr(e.entry_date,7,4)||'-'||substr(e.entry_date,4,2)||'-'||substr(e.entry_date,1,2)
+            ELSE e.entry_date END"""
+        if from_date:
+            conditions.append(f"{normalized_date} >= ?")
+            parameters.append(from_date)
+        if to_date:
+            conditions.append(f"{normalized_date} <= ?")
+            parameters.append(to_date)
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as db:
-            rows = db.execute("""SELECT a.code,a.name_en,e.currency,SUM(CAST(j.debit AS REAL)) debit,SUM(CAST(j.credit AS REAL)) credit,
+            rows = db.execute(f"""SELECT a.code,a.name_en,e.currency,SUM(CAST(j.debit AS REAL)) debit,SUM(CAST(j.credit AS REAL)) credit,
                 SUM(CAST(j.debit AS REAL)-CAST(j.credit AS REAL)) balance
                 FROM journal_lines j JOIN accounts a ON a.id=j.account_id JOIN journal_entries e ON e.id=j.entry_id
-                GROUP BY a.id,e.currency ORDER BY e.currency,a.code""").fetchall()
+                {where_clause}
+                GROUP BY a.id,e.currency ORDER BY e.currency,a.code""", parameters).fetchall()
             return [dict(r) for r in rows]
