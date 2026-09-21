@@ -108,15 +108,95 @@ class SaberApp(tk.Tk):
 
     def build_invoices(self):
         l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),110),("date",tr(l,"date"),110),("party",tr(l,"party"),230),("kind","Type",80),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),110),("vat",tr(l,"vat"),90),("total",tr(l,"total"),110),("supplier_account","Supplier A/C",90),("vat_account","VAT A/C",80),("expense_account","Expense A/C",90),("status","Status",90),("row",tr(l,"source_row"),75)])
-        tk.Button(self.invoices_tab,text=tr(l,"refresh"),command=self.load_invoices,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(pady=(0,10)); self.load_invoices()
+        invoice_actions=tk.Frame(self.invoices_tab,bg=LIGHT); invoice_actions.pack(pady=(0,10))
+        tk.Button(invoice_actions,text=tr(l,"refresh"),command=self.load_invoices,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(side="left",padx=4)
+        tk.Button(invoice_actions,text="Edit Selected",command=self.edit_selected_invoice,bg=GOLD,fg=NAVY,
+                  font=("Segoe UI",9,"bold"),border=0,padx=20,pady=7).pack(side="left",padx=4)
+        self.invoice_tree.bind("<Double-1>",lambda _event:self.edit_selected_invoice())
+        self.load_invoices()
 
     def load_invoices(self):
         try: rows=self.client.invoices()
         except Exception as exc: return messagebox.showerror("Error",str(exc))
         selected=self.view_currency.get()
         rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
+        self.invoice_rows={str(r["id"]):r for r in rows}
         self.invoice_tree.delete(*self.invoice_tree.get_children())
-        for r in rows: self.invoice_tree.insert("","end",values=(r["invoice_number"],r["invoice_date"],r["party_name"],r["kind"],r["currency"],r["subtotal"],r["vat"],r["total"],r["supplier_account"],r["vat_account"],r["expense_account"],r["status"],r["source_row"]))
+        for r in rows: self.invoice_tree.insert("","end",iid=str(r["id"]),values=(r["invoice_number"],r["invoice_date"],r["party_name"],r["kind"],r["currency"],r["subtotal"],r["vat"],r["total"],r["supplier_account"],r["vat_account"],r["expense_account"],r["status"],r["source_row"]))
+
+    def edit_selected_invoice(self):
+        selected=self.invoice_tree.selection()
+        if not selected:
+            return messagebox.showwarning("Invoices","Select one invoice row to edit")
+        invoice_id=selected[0]
+        row=self.invoice_rows.get(invoice_id)
+        if not row:
+            return messagebox.showerror("Invoices","The selected invoice could not be found")
+        window=tk.Toplevel(self); window.title(f'Edit Invoice {row["invoice_number"]}')
+        window.configure(bg=LIGHT); window.transient(self); window.grab_set(); window.resizable(False,False)
+        variables={
+            "invoice_number":tk.StringVar(value=row["invoice_number"]),
+            "invoice_date":tk.StringVar(value=row["invoice_date"]),
+            "party_name":tk.StringVar(value=row["party_name"]),
+            "kind":tk.StringVar(value=row["kind"]),
+            "currency":tk.StringVar(value=row["currency"]),
+            "subtotal":tk.StringVar(value=row["subtotal"]),
+            "vat":tk.StringVar(value=row["vat"]),
+            "total":tk.StringVar(value=row["total"]),
+            "supplier_account":tk.StringVar(value=row["supplier_account"]),
+            "vat_account":tk.StringVar(value=row["vat_account"]),
+            "expense_account":tk.StringVar(value=row["expense_account"]),
+            "status":tk.StringVar(value=row["status"]),
+        }
+        fields=[
+            ("Invoice Number","invoice_number"),("Date (DD-MM-YYYY)","invoice_date"),
+            ("Customer / Supplier","party_name"),("Type","kind"),("Currency","currency"),
+            ("Before VAT","subtotal"),("VAT","vat"),("Total","total"),
+            ("Supplier Account","supplier_account"),("VAT Account","vat_account"),
+            ("Expense Account","expense_account"),("Status","status"),
+        ]
+        for index,(label,key) in enumerate(fields):
+            grid_row=index//2; grid_column=(index%2)*2
+            tk.Label(window,text=label,bg=LIGHT,anchor="w").grid(row=grid_row,column=grid_column,sticky="w",padx=(14,5),pady=8)
+            if key=="kind":
+                widget=ttk.Combobox(window,textvariable=variables[key],values=["purchase","sale"],state="readonly",width=24)
+            elif key=="currency":
+                widget=ttk.Combobox(window,textvariable=variables[key],values=["USD","EUR","LBP","AED"],state="readonly",width=24)
+            elif key=="status":
+                widget=ttk.Combobox(window,textvariable=variables[key],values=["posted","review"],state="readonly",width=24)
+            else:
+                widget=tk.Entry(window,textvariable=variables[key],width=27)
+            widget.grid(row=grid_row,column=grid_column+1,padx=(5,14),pady=8)
+
+        def save_update():
+            values={key:variable.get().strip() for key,variable in variables.items()}
+            if not all(values[key] for key in ("invoice_number","invoice_date","party_name")):
+                return messagebox.showwarning("Invoices","Invoice number, date, and customer/supplier are required",parent=window)
+            try:
+                datetime.strptime(values["invoice_date"],"%d-%m-%Y")
+            except ValueError:
+                try:
+                    datetime.strptime(values["invoice_date"],"%Y-%m-%d")
+                except ValueError:
+                    return messagebox.showwarning("Invoices","Date must use DD-MM-YYYY",parent=window)
+            try:
+                subtotal=float(values["subtotal"]); vat=float(values["vat"]); total=float(values["total"])
+            except ValueError:
+                return messagebox.showwarning("Invoices","Before VAT, VAT, and Total must be valid numbers",parent=window)
+            if abs((subtotal+vat)-total)>0.005:
+                return messagebox.showwarning("Invoices","Total must equal Before VAT plus VAT",parent=window)
+            try:
+                self.client.update_invoice(int(invoice_id),values)
+            except Exception as exc:
+                return messagebox.showerror("Invoices",str(exc),parent=window)
+            window.destroy()
+            self.load_invoices(); self.load_dashboard(); self.load_trial()
+            messagebox.showinfo("Invoices","Invoice updated successfully")
+
+        buttons=tk.Frame(window,bg=LIGHT); buttons.grid(row=(len(fields)+1)//2,column=0,columnspan=4,pady=16)
+        tk.Button(buttons,text="Save Update",command=save_update,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),
+                  border=0,padx=24,pady=8).pack(side="left",padx=5)
+        tk.Button(buttons,text="Cancel",command=window.destroy,bg=NAVY,fg="white",border=0,padx=20,pady=8).pack(side="left",padx=5)
 
     def build_manual(self):
         header=tk.LabelFrame(self.manual_tab,text="Invoice Details",bg=LIGHT,padx=10,pady=8)
