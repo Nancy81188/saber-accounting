@@ -70,13 +70,13 @@ class SaberApp(tk.Tk):
         tk.Label(top,text=tr(lang,"title"),bg=NAVY,fg="white",font=("Segoe UI",20,"bold")).pack(side="left",padx=28,pady=19)
         tk.Label(top,text="11% VAT  |  USD · LBP · EUR · AED",bg=NAVY,fg=GOLD,font=("Segoe UI",10,"bold")).pack(side="right",padx=28)
         notebook=ttk.Notebook(self); notebook.pack(fill="both",expand=True,padx=18,pady=16)
-        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT)
-        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text="Manual Entry"); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.trial_tab,text="Trial Balance")
+        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT)
+        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text="Manual Entry"); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.trial_tab,text="Trial Balance"); notebook.add(self.accounts_tab,text="Lebanese Chart of Accounts")
         filter_bar=tk.Frame(self,bg=LIGHT); filter_bar.pack(fill="x",padx=28)
         tk.Label(filter_bar,text="Show currency:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
         currency_filter=ttk.Combobox(filter_bar,textvariable=self.view_currency,values=["All Currencies","USD","EUR","LBP","AED"],state="readonly",width=16)
         currency_filter.pack(side="left",padx=8); currency_filter.bind("<<ComboboxSelected>>",lambda _event:self.currency_changed())
-        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_trial()
+        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_trial(); self.build_accounts()
 
     def currency_changed(self):
         self.load_dashboard(); self.load_invoices(); self.load_trial()
@@ -203,9 +203,9 @@ class SaberApp(tk.Tk):
         header.pack(fill="x",padx=10,pady=(10,4))
         self.manual_no=tk.StringVar(); self.manual_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y"))
         self.manual_party=tk.StringVar(); self.manual_kind=tk.StringVar(value="purchase"); self.manual_currency=tk.StringVar(value="USD")
-        self.manual_supplier_account=tk.StringVar(value="2100")
-        self.manual_vat_account=tk.StringVar(value="1300")
-        self.manual_expense_account=tk.StringVar(value="5100")
+        self.manual_supplier_account=tk.StringVar(value="4011")
+        self.manual_vat_account=tk.StringVar(value="4426.6")
+        self.manual_expense_account=tk.StringVar(value="6011")
         fields=[("Invoice Number",self.manual_no,16),("Date",self.manual_date,14),("Customer / Supplier",self.manual_party,28)]
         for col,(label,var,width) in enumerate(fields):
             tk.Label(header,text=label,bg=LIGHT).grid(row=0,column=col*2,sticky="w",padx=4)
@@ -317,9 +317,9 @@ class SaberApp(tk.Tk):
     def save_manual_invoice(self):
         invoice={"invoice_number":self.manual_no.get().strip(),"invoice_date":self.manual_date.get().strip(),
                  "party_name":self.manual_party.get().strip(),"kind":self.manual_kind.get(),"currency":self.manual_currency.get(),
-                 "supplier_account":self.manual_supplier_account.get().strip() or "2100",
-                 "vat_account":self.manual_vat_account.get().strip() or "1300",
-                 "expense_account":self.manual_expense_account.get().strip() or "5100",
+                 "supplier_account":self.manual_supplier_account.get().strip() or "4011",
+                 "vat_account":self.manual_vat_account.get().strip() or "4426.6",
+                 "expense_account":self.manual_expense_account.get().strip() or "6011",
                  "source_file":"Manual Entry","source_row":None}
         if not all((invoice["invoice_number"],invoice["invoice_date"],invoice["party_name"])):
             return messagebox.showwarning("Manual Entry","Enter invoice number, date, and customer/supplier")
@@ -369,6 +369,26 @@ class SaberApp(tk.Tk):
         except Exception as exc: return messagebox.showerror("Import",str(exc))
         messagebox.showinfo("Import",f'Previous invoices removed: {result["deleted"]}\n{result["imported"]} {tr(self.language.get(),"imported")}\nErrors: {len(result["errors"])}')
         self.load_dashboard(); self.load_invoices()
+
+    def build_accounts(self):
+        controls=tk.Frame(self.accounts_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=(10,0))
+        tk.Label(controls,text="Official Lebanese PCGL - Classes 1 to 7",bg=LIGHT,
+                 font=("Segoe UI",11,"bold"),fg=NAVY).pack(side="left")
+        self.action_button(controls,tr(self.language.get(),"refresh"),self.load_accounts).pack(side="right")
+        self.accounts_tree=self.table(self.accounts_tab,[
+            ("code","Account",100),("parent","Parent",80),("english","English",270),
+            ("french","French",270),("arabic","Arabic",270),("type","Type",90)])
+        self.load_accounts()
+
+    def load_accounts(self):
+        try:
+            rows=self.client.accounts()
+        except Exception as exc:
+            return messagebox.showerror("Error",str(exc))
+        self.accounts_tree.delete(*self.accounts_tree.get_children())
+        for row in rows:
+            self.accounts_tree.insert("","end",values=(row["code"],row.get("parent_code") or "",
+                row["name_en"],row.get("name_fr") or "",row.get("name_ar") or "",row["type"]))
 
     def build_trial(self):
         filters=tk.Frame(self.trial_tab,bg=LIGHT); filters.pack(fill="x",padx=10,pady=(10,0))
