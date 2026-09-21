@@ -34,6 +34,14 @@ class ApiClient:
     def dashboard(self): return self.request("GET", "/api/dashboard")["items"]
     def invoices(self): return self.request("GET", "/api/invoices")["items"]
     def accounts(self): return self.request("GET", "/api/accounts")["items"]
+    def parties(self): return self.request("GET", "/api/parties")["items"]
+    def statement(self, party_id, from_date=None, to_date=None, currency=None):
+        query = urlencode({key:value for key,value in {
+            "party_id":party_id,"from_date":from_date,"to_date":to_date,"currency":currency
+        }.items() if value})
+        return self.request("GET", f"/api/statement?{query}")
+    def add_invoice_item(self, invoice_id, item):
+        return self.request("POST", f"/api/invoices/{invoice_id}/items", {"item":item})["invoice"]
     def trial_balance(self, from_date=None, to_date=None):
         query = urlencode({key: value for key, value in {
             "from_date": from_date, "to_date": to_date
