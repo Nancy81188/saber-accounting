@@ -255,6 +255,78 @@ class Database:
                 (user_id, "manual_entry", "invoice", invoice_id, json.dumps({"items": len(normalized)}), utcnow()))
         return invoice_id
 
+    def update_invoice(self, invoice_id, item, user_id):
+        required = ("invoice_number", "invoice_date", "party_name", "kind", "currency")
+        missing = [field for field in required if not str(item.get(field) or "").strip()]
+        if missing:
+            raise ValueError("Missing fields: " + ", ".join(missing))
+        kind = str(item["kind"]).lower()
+        currency = str(item["currency"]).upper()
+        if kind not in ("sale", "purchase"):
+            raise ValueError("Type must be sale or purchase")
+        if currency not in ("USD", "EUR", "LBP", "AED"):
+            raise ValueError("Currency must be USD, EUR, LBP, or AED")
+        try:
+            subtotal = Decimal(str(item.get("subtotal") or 0))
+            vat = Decimal(str(item.get("vat") or 0))
+            total = Decimal(str(item.get("total") or 0))
+        except Exception as exc:
+            raise ValueError("Before VAT, VAT, and Total must be valid numbers") from exc
+        if min(subtotal, vat, total) < 0:
+            raise ValueError("Amounts cannot be negative")
+        if total != subtotal + vat:
+            raise ValueError("Total must equal Before VAT plus VAT")
+        supplier_account = str(item.get("supplier_account") or "2100").strip()
+        vat_account = str(item.get("vat_account") or "1300").strip()
+        expense_account = str(item.get("expense_account") or "5100").strip()
+        status = str(item.get("status") or "posted").strip().lower()
+        if status not in ("posted", "review"):
+            raise ValueError("Status must be posted or review")
+        with self.connect() as db:
+            existing = db.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
+            if not existing:
+                raise KeyError(invoice_id)
+            party_kind = "customer" if kind == "sale" else "supplier"
+            party_name = str(item["party_name"]).strip()
+            db.execute("INSERT OR IGNORE INTO parties(kind,name,currency) VALUES(?,?,?)", (party_kind, party_name, currency))
+            party = db.execute("SELECT id FROM parties WHERE kind=? AND name=?", (party_kind, party_name)).fetchone()
+            for code, name, account_type in (
+                (supplier_account, "Supplier Account", "liability"),
+                (vat_account, "VAT Account", "asset"),
+                (expense_account, "Expense Account", "expense"),
+            ):
+                db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)", (code, name, account_type))
+            db.execute("""UPDATE invoices SET invoice_number=?,kind=?,invoice_date=?,party_id=?,currency=?,
+                subtotal=?,vat=?,total=?,status=?,supplier_account=?,vat_account=?,expense_account=? WHERE id=?""",
+                (str(item["invoice_number"]).strip(), kind, str(item["invoice_date"]).strip(), party["id"], currency,
+                 str(subtotal), str(vat), str(total), status, supplier_account, vat_account, expense_account, invoice_id))
+            entry = db.execute("SELECT id FROM journal_entries WHERE source_type='invoice' AND source_id=?", (invoice_id,)).fetchone()
+            description = f"{kind.title()} invoice {str(item['invoice_number']).strip()}"
+            if entry:
+                entry_id = entry["id"]
+                db.execute("DELETE FROM journal_lines WHERE entry_id=?", (entry_id,))
+                db.execute("UPDATE journal_entries SET entry_date=?,description=?,currency=? WHERE id=?",
+                           (str(item["invoice_date"]).strip(), description, currency, entry_id))
+            else:
+                created = db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
+                    VALUES(?,?,?,?,?,?,?,?)""", (f"INV-{invoice_id}", str(item["invoice_date"]).strip(), description,
+                    "invoice", invoice_id, currency, user_id, utcnow()))
+                entry_id = created.lastrowid
+            if kind == "sale":
+                lines = [("1100", total, Decimal("0")), ("4100", Decimal("0"), subtotal), ("2200", Decimal("0"), vat)]
+            else:
+                lines = [(expense_account, subtotal, Decimal("0")), (vat_account, vat, Decimal("0")), (supplier_account, Decimal("0"), total)]
+            for code, debit, credit in lines:
+                db.execute("INSERT INTO journal_lines(entry_id,account_id,party_id,debit,credit) VALUES(?,?,?,?,?)",
+                           (entry_id, self._account_id(db, code), party["id"], str(debit), str(credit)))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                       (user_id, "update", "invoice", invoice_id, json.dumps({"fields": sorted(item.keys())}), utcnow()))
+            row = db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,
+                i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.supplier_account,i.vat_account,
+                i.expense_account,i.source_row FROM invoices i LEFT JOIN parties p ON p.id=i.party_id WHERE i.id=?""",
+                (invoice_id,)).fetchone()
+            return dict(row)
+
     def list_invoices(self, limit=500):
         with self.connect() as db:
             return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row
