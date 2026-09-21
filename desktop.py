@@ -438,6 +438,7 @@ class SaberApp(tk.Tk):
         tk.Label(controls,text="Client / Supplier:",bg=LIGHT).pack(side="left")
         self.statement_party_combo=ttk.Combobox(controls,textvariable=self.statement_party,state="readonly",width=28)
         self.statement_party_combo.pack(side="left",padx=5)
+        tk.Button(controls,text="Refresh Parties",command=self.refresh_statement_parties,bg=NAVY,fg="white",border=0,padx=10,pady=5).pack(side="left",padx=3)
         tk.Label(controls,text="From:",bg=LIGHT).pack(side="left",padx=(8,2))
         tk.Entry(controls,textvariable=self.statement_from_date,width=12).pack(side="left")
         tk.Label(controls,text="To:",bg=LIGHT).pack(side="left",padx=(8,2))
@@ -452,6 +453,11 @@ class SaberApp(tk.Tk):
         self.action_button(actions,"Print",lambda:self.statement_report("print")).pack(side="left",padx=4)
         self.statement_total=tk.Label(actions,text="",bg=LIGHT,font=("Segoe UI",10,"bold")); self.statement_total.pack(side="left",padx=15)
         self.load_statement_parties()
+
+    def refresh_statement_parties(self):
+        self.load_statement_parties()
+        if self.statement_party.get():
+            self.load_statement()
 
     def load_statement_parties(self):
         try: parties=self.client.parties()
