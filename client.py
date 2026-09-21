@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 class ApiClient:
@@ -32,6 +33,11 @@ class ApiClient:
 
     def dashboard(self): return self.request("GET", "/api/dashboard")["items"]
     def invoices(self): return self.request("GET", "/api/invoices")["items"]
-    def trial_balance(self): return self.request("GET", "/api/trial-balance")["items"]
+    def trial_balance(self, from_date=None, to_date=None):
+        query = urlencode({key: value for key, value in {
+            "from_date": from_date, "to_date": to_date
+        }.items() if value})
+        path = "/api/trial-balance" + (f"?{query}" if query else "")
+        return self.request("GET", path)["items"]
     def import_invoices(self, items, replace_existing=True): return self.request("POST", "/api/invoices/import", {"items": items, "replace_existing": replace_existing})
     def create_manual_invoice(self, invoice, items): return self.request("POST", "/api/invoices/manual", {"invoice": invoice, "items": items})
