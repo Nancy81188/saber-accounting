@@ -4,7 +4,7 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from database import Database
 
@@ -32,7 +32,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         return self.db.user_for_token(token)
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/health":
             return self._json(200, {"status": "ok", "application": "Saber Accounting"})
         user = self._user()
@@ -43,7 +44,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/dashboard":
             return self._json(200, {"items": self.db.dashboard()})
         if path == "/api/trial-balance":
-            return self._json(200, {"items": self.db.trial_balance()})
+            query = parse_qs(parsed.query)
+            from_date = query.get("from_date", [None])[0]
+            to_date = query.get("to_date", [None])[0]
+            return self._json(200, {"items": self.db.trial_balance(from_date, to_date)})
         return self._json(404, {"error": "Not found"})
 
     def do_POST(self):
