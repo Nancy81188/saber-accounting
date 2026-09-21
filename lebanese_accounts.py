@@ -12,7 +12,7 @@ LEBANESE_ACCOUNTS = [
     "رأس المال",
     "Comptes de Capitaux Permanents",
     "equity",
-    null
+    None
   ],
   [
     "10",
@@ -604,7 +604,7 @@ LEBANESE_ACCOUNTS = [
     "حسابات الأصول الثابتة",
     "Comptes d’Immobilisations",
     "asset",
-    null
+    None
   ],
   [
     "21",
@@ -1396,7 +1396,7 @@ LEBANESE_ACCOUNTS = [
     "المخزون وقيد الصنع",
     "Comptes de Stocks et en Cours",
     "asset",
-    null
+    None
   ],
   [
     "31",
@@ -1484,7 +1484,7 @@ LEBANESE_ACCOUNTS = [
     "حسابات الذمم",
     "Comptes de Tiers",
     "asset",
-    null
+    None
   ],
   [
     "40",
@@ -2436,7 +2436,7 @@ LEBANESE_ACCOUNTS = [
     "الحسابات المالية",
     "Comptes Financiers",
     "asset",
-    null
+    None
   ],
   [
     "50",
@@ -2588,7 +2588,7 @@ LEBANESE_ACCOUNTS = [
     "حسابات الأعباء",
     "Comptes de Charges",
     "expense",
-    null
+    None
   ],
   [
     "60",
@@ -3908,7 +3908,7 @@ LEBANESE_ACCOUNTS = [
     "حسابات الإيرادات",
     "Comptes de Produits",
     "income",
-    null
+    None
   ],
   [
     "70",
@@ -4572,7 +4572,7 @@ LEBANESE_ACCOUNTS = [
     "حسابات الإلتزامات خارج الميزانية",
     "Comptes des Engagements Hors Bilan",
     "equity",
-    null
+    None
   ],
   [
     "80",
