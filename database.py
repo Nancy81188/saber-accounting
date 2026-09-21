@@ -346,6 +346,92 @@ class Database:
                 (invoice_id,)).fetchone()
             return dict(row)
 
+    def add_invoice_item(self, invoice_id, line, user_id):
+        description = str(line.get("description") or "").strip()
+        if not description:
+            raise ValueError("Description is required")
+        try:
+            quantity = Decimal(str(line.get("quantity") or 0))
+            unit_price = Decimal(str(line.get("unit_price") or 0))
+            subtotal = Decimal(str(line.get("subtotal") if line.get("subtotal") not in (None, "") else quantity * unit_price))
+            vat_rate = Decimal(str(line.get("vat_rate") if line.get("vat_rate") not in (None, "") else 11))
+            vat = Decimal(str(line.get("vat") if line.get("vat") not in (None, "") else subtotal * vat_rate / Decimal("100")))
+        except Exception as exc:
+            raise ValueError("Invalid item amount") from exc
+        if quantity <= 0 or min(unit_price, subtotal, vat, vat_rate) < 0:
+            raise ValueError("Item values cannot be negative and quantity must be above zero")
+        subtotal = subtotal.quantize(Decimal("0.01")); vat = vat.quantize(Decimal("0.01"))
+        total = subtotal + vat
+        with self.connect() as db:
+            row = db.execute("""SELECT i.*,p.name party_name FROM invoices i
+                LEFT JOIN parties p ON p.id=i.party_id WHERE i.id=?""", (invoice_id,)).fetchone()
+            if not row:
+                raise KeyError(invoice_id)
+            invoice = dict(row)
+        updated_values = {
+            "invoice_number": invoice["invoice_number"], "invoice_date": invoice["invoice_date"],
+            "party_name": invoice["party_name"], "kind": invoice["kind"], "currency": invoice["currency"],
+            "subtotal": str(Decimal(str(invoice["subtotal"] or 0)) + subtotal),
+            "vat": str(Decimal(str(invoice["vat"] or 0)) + vat),
+            "total": str(Decimal(str(invoice["total"] or 0)) + total),
+            "supplier_account": invoice["supplier_account"], "vat_account": invoice["vat_account"],
+            "expense_account": invoice["expense_account"], "status": "posted",
+        }
+        updated = self.update_invoice(invoice_id, updated_values, user_id)
+        with self.connect() as db:
+            db.execute("""INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,subtotal,vat_rate,vat,total)
+                VALUES(?,?,?,?,?,?,?,?)""", (invoice_id, description, str(quantity), str(unit_price),
+                str(subtotal), str(vat_rate), str(vat), str(total)))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                       (user_id, "add_item", "invoice", invoice_id, json.dumps({"description": description}), utcnow()))
+        return updated
+
+    def list_parties(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT id,kind,name,currency FROM parties ORDER BY name,kind")]
+
+    def statement_of_account(self, party_id, from_date=None, to_date=None, currency=None):
+        normalized_date = """CASE
+            WHEN i.invoice_date GLOB '??-??-????'
+                THEN substr(i.invoice_date,7,4)||'-'||substr(i.invoice_date,4,2)||'-'||substr(i.invoice_date,1,2)
+            ELSE i.invoice_date END"""
+        filters = ["i.party_id=?"]
+        parameters = [party_id]
+        if currency:
+            filters.append("i.currency=?"); parameters.append(currency)
+        if to_date:
+            filters.append(f"{normalized_date} <= ?"); parameters.append(to_date)
+        with self.connect() as db:
+            party = db.execute("SELECT id,kind,name,currency FROM parties WHERE id=?", (party_id,)).fetchone()
+            if not party:
+                raise KeyError(party_id)
+            rows = [dict(row) for row in db.execute(f"""SELECT i.id,i.invoice_number,i.invoice_date,i.kind,
+                i.currency,i.total FROM invoices i WHERE {' AND '.join(filters)}
+                ORDER BY {normalized_date},i.id""", parameters)]
+        opening = {}
+        items = []
+        for row in rows:
+            normalized = row["invoice_date"]
+            try:
+                normalized = datetime.strptime(normalized, "%d-%m-%Y").strftime("%Y-%m-%d")
+            except (TypeError, ValueError):
+                pass
+            amount = Decimal(str(row["total"] or 0))
+            debit = amount if row["kind"] == "sale" else Decimal("0")
+            credit = amount if row["kind"] == "purchase" else Decimal("0")
+            if from_date and normalized < from_date:
+                opening[row["currency"]] = opening.get(row["currency"], Decimal("0")) + debit - credit
+                continue
+            items.append({**row, "description": f"{row['kind'].title()} invoice {row['invoice_number']}",
+                          "debit": float(debit), "credit": float(credit)})
+        balances = dict(opening)
+        for row in items:
+            code = row["currency"]
+            balances[code] = balances.get(code, Decimal("0")) + Decimal(str(row["debit"])) - Decimal(str(row["credit"]))
+            row["balance"] = float(balances[code])
+        return {"party": dict(party), "opening": {key: float(value) for key,value in opening.items()}, "items": items}
+
     def list_invoices(self, limit=500):
         with self.connect() as db:
             return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row
