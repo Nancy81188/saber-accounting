@@ -136,6 +136,27 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertNotIn("conflicting",rows[4]["currency_issue"])
             self.assertEqual(rows[5]["currency_issue"], "")
 
+    def test_update_specific_invoice_row(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"update.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            invoice={"invoice_number":"OLD-1","invoice_date":"01-09-2026","party_name":"Old Supplier",
+                     "kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111}
+            invoice_id=db.import_invoice(invoice,user["id"])
+            updated=db.update_invoice(invoice_id,{
+                "invoice_number":"NEW-1","invoice_date":"20-09-2026","party_name":"New Supplier",
+                "kind":"purchase","currency":"EUR","subtotal":"200","vat":"22","total":"222",
+                "supplier_account":"2110","vat_account":"1310","expense_account":"5110","status":"posted",
+            },user["id"])
+            self.assertEqual(updated["invoice_number"],"NEW-1")
+            self.assertEqual(updated["currency"],"EUR")
+            self.assertEqual(updated["party_name"],"New Supplier")
+            trial=db.trial_balance("2026-09-20","2026-09-20")
+            self.assertEqual({row["currency"] for row in trial},{"EUR"})
+            self.assertAlmostEqual(sum(float(row["debit"] or 0) for row in trial),222.0)
+            self.assertAlmostEqual(sum(float(row["credit"] or 0) for row in trial),222.0)
+            self.assertTrue({"2110","1310","5110"}.issubset({row["code"] for row in trial}))
+
     def test_trial_balance_date_range(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"dates.db"); db.initialize("secret")
