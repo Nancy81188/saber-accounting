@@ -114,6 +114,8 @@ class SaberApp(tk.Tk):
         l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),110),("date",tr(l,"date"),110),("party",tr(l,"party"),230),("kind","Type",80),("currency",tr(l,"currency"),75),("subtotal",tr(l,"before_vat"),110),("vat",tr(l,"vat"),90),("total",tr(l,"total"),110),("supplier_account","Supplier A/C",90),("vat_account","VAT A/C",80),("expense_account","Expense A/C",90),("status","Status",90),("row",tr(l,"source_row"),75)])
         invoice_actions=tk.Frame(self.invoices_tab,bg=LIGHT); invoice_actions.pack(pady=(0,10))
         tk.Button(invoice_actions,text=tr(l,"refresh"),command=self.load_invoices,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(side="left",padx=4)
+        tk.Button(invoice_actions,text="Save Data",command=self.confirm_invoice_data_saved,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
+        tk.Button(invoice_actions,text="Export Excel",command=self.export_invoices_excel,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
         tk.Button(invoice_actions,text="Add Invoice Row",command=self.add_invoice_row,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
         tk.Button(invoice_actions,text="Add Item",command=self.add_item_to_selected_invoice,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
         tk.Button(invoice_actions,text="Edit Selected",command=self.edit_selected_invoice,bg=GOLD,fg=NAVY,
@@ -203,6 +205,30 @@ class SaberApp(tk.Tk):
         tk.Button(buttons,text="Save Update",command=save_update,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),
                   border=0,padx=24,pady=8).pack(side="left",padx=5)
         tk.Button(buttons,text="Cancel",command=window.destroy,bg=NAVY,fg="white",border=0,padx=20,pady=8).pack(side="left",padx=5)
+
+    def confirm_invoice_data_saved(self):
+        try:
+            rows=self.client.invoices()
+        except Exception as exc:
+            return messagebox.showerror("Invoices",str(exc))
+        self.load_invoices()
+        messagebox.showinfo("Invoices",f"{len(rows)} invoice rows are saved in the shared database")
+
+    def export_invoices_excel(self):
+        rows=list(getattr(self,"invoice_rows",{}).values())
+        if not rows: return messagebox.showwarning("Invoices","No invoice data to export")
+        headers=["Invoice Number","Date","Customer / Supplier","Type","Currency","Before VAT","VAT","Total",
+                 "Supplier Account","VAT Account","Expense Account","Status","Source Row"]
+        values=[[r["invoice_number"],r["invoice_date"],r["party_name"],r["kind"],r["currency"],r["subtotal"],
+                 r["vat"],r["total"],r["supplier_account"],r["vat_account"],r["expense_account"],r["status"],r["source_row"]] for r in rows]
+        path=filedialog.asksaveasfilename(defaultextension=".xlsx",filetypes=[("Excel workbook","*.xlsx")],
+                                          initialfile="Saber_Accounting_Invoices.xlsx")
+        if not path: return
+        try:
+            export_excel(path,"Saber Accounting - Invoices",headers,values)
+            messagebox.showinfo("Invoices",f"Saved successfully:\n{path}")
+        except Exception as exc:
+            messagebox.showerror("Invoices",str(exc))
 
     def add_invoice_row(self):
         window=tk.Toplevel(self); window.title("Add Invoice Row"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
