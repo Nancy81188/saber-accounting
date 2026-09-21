@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from lebanese_accounts import DEFAULT_LEBANESE_ACCOUNTS, LEBANESE_ACCOUNTS
+
 SCHEMA = """
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users (
@@ -30,7 +32,7 @@ CREATE TABLE IF NOT EXISTS invoices (
  id INTEGER PRIMARY KEY, invoice_number TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('sale','purchase')),
  invoice_date TEXT, party_id INTEGER REFERENCES parties(id), currency TEXT NOT NULL, exchange_rate TEXT NOT NULL DEFAULT '1',
  subtotal TEXT, vat TEXT, total TEXT, status TEXT NOT NULL DEFAULT 'posted', currency_issue TEXT NOT NULL DEFAULT '',
- supplier_account TEXT NOT NULL DEFAULT '2100', vat_account TEXT NOT NULL DEFAULT '1300', expense_account TEXT NOT NULL DEFAULT '5100',
+ supplier_account TEXT NOT NULL DEFAULT '4011', vat_account TEXT NOT NULL DEFAULT '4426.6', expense_account TEXT NOT NULL DEFAULT '6011',
  source_file TEXT, source_row INTEGER,
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
@@ -60,17 +62,15 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 """
 
-DEFAULT_ACCOUNTS = [
-    ("1100", "Accounts Receivable", "ذمم العملاء", "Clients", "asset"),
-    ("1200", "Inventory", "المخزون", "Stock", "asset"),
-    ("2100", "Accounts Payable", "ذمم الموردين", "Fournisseurs", "liability"),
-    ("2200", "VAT Payable", "ضريبة مستحقة", "TVA à payer", "liability"),
-    ("1300", "VAT Receivable", "ضريبة قابلة للاسترداد", "TVA déductible", "asset"),
-    ("4100", "Sales Revenue", "إيرادات المبيعات", "Ventes", "income"),
-    ("5100", "Purchases", "المشتريات", "Achats", "expense"),
-    ("9999", "Import Variance", "فروقات الاستيراد", "Écart d'importation", "expense"),
-]
-
+LEGACY_ACCOUNT_MAP = {
+    "1100": DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"],
+    "2100": DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"],
+    "2200": DEFAULT_LEBANESE_ACCOUNTS["vat_payable"],
+    "1300": DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"],
+    "4100": DEFAULT_LEBANESE_ACCOUNTS["sales"],
+    "5100": DEFAULT_LEBANESE_ACCOUNTS["purchases"],
+    "9999": DEFAULT_LEBANESE_ACCOUNTS["import_variance"],
+}
 def utcnow():
     return datetime.now(timezone.utc).isoformat()
 
@@ -109,9 +109,9 @@ class Database:
             if "currency_issue" not in invoice_columns:
                 db.execute("ALTER TABLE invoices ADD COLUMN currency_issue TEXT NOT NULL DEFAULT ''")
             account_columns = {
-                "supplier_account": "2100",
-                "vat_account": "1300",
-                "expense_account": "5100",
+                "supplier_account": DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"],
+                "vat_account": DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"],
+                "expense_account": DEFAULT_LEBANESE_ACCOUNTS["purchases"],
             }
             for column, default_code in account_columns.items():
                 if column not in invoice_columns:
@@ -120,7 +120,26 @@ class Database:
                         f"TEXT NOT NULL DEFAULT '{default_code}'"
                     )
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
-            db.executemany("INSERT OR IGNORE INTO accounts(code,name_en,name_ar,name_fr,type) VALUES(?,?,?,?,?)", DEFAULT_ACCOUNTS)
+            db.executemany("""INSERT INTO accounts(code,name_en,name_ar,name_fr,type)
+                VALUES(?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET
+                name_en=excluded.name_en,name_ar=excluded.name_ar,name_fr=excluded.name_fr,type=excluded.type""",
+                [row[:5] for row in LEBANESE_ACCOUNTS])
+            for code, _name_en, _name_ar, _name_fr, _type, parent_code in LEBANESE_ACCOUNTS:
+                if parent_code:
+                    db.execute("UPDATE accounts SET parent_id=(SELECT id FROM accounts WHERE code=?) WHERE code=?",
+                               (parent_code, code))
+            for old_code, new_code in LEGACY_ACCOUNT_MAP.items():
+                old = db.execute("SELECT id FROM accounts WHERE code=?", (old_code,)).fetchone()
+                new = db.execute("SELECT id FROM accounts WHERE code=?", (new_code,)).fetchone()
+                if old and new and old["id"] != new["id"]:
+                    db.execute("UPDATE journal_lines SET account_id=? WHERE account_id=?", (new["id"], old["id"]))
+                    db.execute("DELETE FROM accounts WHERE id=?", (old["id"],))
+            db.execute("UPDATE invoices SET supplier_account=? WHERE supplier_account='2100'",
+                       (DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"],))
+            db.execute("UPDATE invoices SET vat_account=? WHERE vat_account='1300'",
+                       (DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"],))
+            db.execute("UPDATE invoices SET expense_account=? WHERE expense_account='5100'",
+                       (DEFAULT_LEBANESE_ACCOUNTS["purchases"],))
 
     def login(self, username, password):
         with self.connect() as db:
@@ -169,9 +188,9 @@ class Database:
             subtotal = Decimal(str(item.get("subtotal") or 0)); vat = Decimal(str(item.get("vat") or 0)); total = Decimal(str(item.get("total") or subtotal + vat))
             currency_issue = str(item.get("currency_issue") or "")
             status = "posted" if total == subtotal + vat and not currency_issue.startswith(("conflicting:", "unsupported:")) else "review"
-            supplier_account = str(item.get("supplier_account") or "2100").strip()
-            vat_account = str(item.get("vat_account") or "1300").strip()
-            expense_account = str(item.get("expense_account") or "5100").strip()
+            supplier_account = str(item.get("supplier_account") or DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]).strip()
+            vat_account = str(item.get("vat_account") or DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"]).strip()
+            expense_account = str(item.get("expense_account") or DEFAULT_LEBANESE_ACCOUNTS["purchases"]).strip()
             account_definitions = [
                 (supplier_account, "Supplier Account", "liability"),
                 (vat_account, "VAT Account", "asset"),
@@ -193,14 +212,14 @@ class Database:
             entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (entry_number, item.get("invoice_date"), f"{item['kind'].title()} invoice {item['invoice_number']}", "invoice", invoice_id, item.get("currency", "USD"), user_id, utcnow()))
             if item["kind"] == "sale":
-                lines = [("1100", total, 0), ("4100", 0, subtotal), ("2200", 0, vat)]
+                lines = [(DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"], total, 0), (DEFAULT_LEBANESE_ACCOUNTS["sales"], 0, subtotal), (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"], 0, vat)]
             else:
                 lines = [(expense_account, subtotal, 0), (vat_account, vat, 0), (supplier_account, 0, total)]
             difference = sum(x[1] for x in lines) - sum(x[2] for x in lines)
             if difference > 0:
-                lines.append(("9999", 0, difference))
+                lines.append((DEFAULT_LEBANESE_ACCOUNTS["import_variance"], 0, difference))
             elif difference < 0:
-                lines.append(("9999", -difference, 0))
+                lines.append((DEFAULT_LEBANESE_ACCOUNTS["import_variance"], -difference, 0))
             for code, debit, credit in lines:
                 db.execute("INSERT INTO journal_lines(entry_id,account_id,party_id,debit,credit) VALUES(?,?,?,?,?)", (entry.lastrowid, self._account_id(db, code), party["id"], str(debit), str(credit)))
             debit_total = sum(x[1] for x in lines); credit_total = sum(x[2] for x in lines)
@@ -276,9 +295,9 @@ class Database:
             raise ValueError("Amounts cannot be negative")
         if total != subtotal + vat:
             raise ValueError("Total must equal Before VAT plus VAT")
-        supplier_account = str(item.get("supplier_account") or "2100").strip()
-        vat_account = str(item.get("vat_account") or "1300").strip()
-        expense_account = str(item.get("expense_account") or "5100").strip()
+        supplier_account = str(item.get("supplier_account") or DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]).strip()
+        vat_account = str(item.get("vat_account") or DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"]).strip()
+        expense_account = str(item.get("expense_account") or DEFAULT_LEBANESE_ACCOUNTS["purchases"]).strip()
         status = str(item.get("status") or "posted").strip().lower()
         if status not in ("posted", "review"):
             raise ValueError("Status must be posted or review")
@@ -313,7 +332,7 @@ class Database:
                     "invoice", invoice_id, currency, user_id, utcnow()))
                 entry_id = created.lastrowid
             if kind == "sale":
-                lines = [("1100", total, Decimal("0")), ("4100", Decimal("0"), subtotal), ("2200", Decimal("0"), vat)]
+                lines = [(DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"], total, Decimal("0")), (DEFAULT_LEBANESE_ACCOUNTS["sales"], Decimal("0"), subtotal), (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"], Decimal("0"), vat)]
             else:
                 lines = [(expense_account, subtotal, Decimal("0")), (vat_account, vat, Decimal("0")), (supplier_account, Decimal("0"), total)]
             for code, debit, credit in lines:
@@ -331,6 +350,12 @@ class Database:
         with self.connect() as db:
             return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row
                 FROM invoices i LEFT JOIN parties p ON p.id=i.party_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
+
+    def list_accounts(self):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute("""SELECT a.code,a.name_en,a.name_ar,a.name_fr,a.type,
+                p.code parent_code FROM accounts a LEFT JOIN accounts p ON p.id=a.parent_id
+                ORDER BY CASE WHEN instr(a.code,'.')>0 THEN replace(a.code,'.','') ELSE a.code END""")]
 
     def dashboard(self):
         with self.connect() as db:
