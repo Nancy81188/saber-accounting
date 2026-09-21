@@ -137,6 +137,28 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertNotIn("conflicting",rows[4]["currency_issue"])
             self.assertEqual(rows[5]["currency_issue"], "")
 
+    def test_add_item_and_statement_of_account(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"statement.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            first={"invoice_number":"P-1","invoice_date":"01-09-2026","party_name":"Supplier A",
+                   "kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111}
+            second={"invoice_number":"P-2","invoice_date":"15-09-2026","party_name":"Supplier A",
+                    "kind":"purchase","currency":"USD","subtotal":200,"vat":22,"total":222}
+            first_id=db.import_invoice(first,user["id"]); db.import_invoice(second,user["id"])
+            updated=db.add_invoice_item(first_id,{"description":"Extra","quantity":1,"unit_price":50,
+                "subtotal":50,"vat_rate":10,"vat":5},user["id"])
+            self.assertEqual(float(updated["total"]),166.0)
+            party=next(row for row in db.list_parties() if row["name"]=="Supplier A")
+            statement=db.statement_of_account(party["id"],"2026-09-10","2026-09-30","USD")
+            self.assertEqual(statement["opening"]["USD"],-166.0)
+            self.assertEqual(len(statement["items"]),1)
+            self.assertEqual(statement["items"][0]["credit"],222.0)
+            self.assertEqual(statement["items"][0]["balance"],-388.0)
+            trial=db.trial_balance()
+            self.assertAlmostEqual(sum(float(row["debit"] or 0) for row in trial),
+                                   sum(float(row["credit"] or 0) for row in trial),places=2)
+
     def test_full_lebanese_chart_and_default_posting(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"lebanese.db"); db.initialize("secret")
