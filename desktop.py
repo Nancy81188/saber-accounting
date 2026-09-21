@@ -24,6 +24,8 @@ class SaberApp(tk.Tk):
         self.manual_items = []
         self.view_currency = tk.StringVar(value="All Currencies")
         self.import_view_currency = tk.StringVar(value="All Currencies")
+        self.trial_from_date = tk.StringVar()
+        self.trial_to_date = tk.StringVar()
         self._style()
         self.login_screen()
 
@@ -289,6 +291,14 @@ class SaberApp(tk.Tk):
         self.load_dashboard(); self.load_invoices()
 
     def build_trial(self):
+        filters=tk.Frame(self.trial_tab,bg=LIGHT); filters.pack(fill="x",padx=10,pady=(10,0))
+        tk.Label(filters,text="From Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
+        tk.Entry(filters,textvariable=self.trial_from_date,width=13).pack(side="left",padx=(5,14))
+        tk.Label(filters,text="To Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
+        tk.Entry(filters,textvariable=self.trial_to_date,width=13).pack(side="left",padx=(5,10))
+        tk.Label(filters,text="DD-MM-YYYY",bg=LIGHT,fg="#5f6b76").pack(side="left",padx=(0,10))
+        tk.Button(filters,text="Apply",command=self.apply_trial_date_filter,bg=GOLD,fg=NAVY,
+                  font=("Segoe UI",9,"bold"),border=0,padx=16,pady=6).pack(side="left")
         self.trial_tree=self.table(self.trial_tab,[("currency","Currency",90),("code","Account",110),("name","Name",280),("debit","Debit",150),("credit","Credit",150),("balance","Balance",160)])
         actions=tk.Frame(self.trial_tab,bg=LIGHT); actions.pack(pady=(0,10))
         self.action_button(actions,tr(self.language.get(),"refresh"),self.load_trial).pack(side="left",padx=4)
@@ -296,8 +306,34 @@ class SaberApp(tk.Tk):
         self.action_button(actions,"Export PDF",lambda:self.export_report("trial","pdf")).pack(side="left",padx=4)
         self.action_button(actions,"Print",lambda:self.export_report("trial","print")).pack(side="left",padx=4); self.load_trial()
 
+    def trial_date_range(self, show_error=True):
+        values = []
+        for label, raw_value in (("From Date", self.trial_from_date.get()), ("To Date", self.trial_to_date.get())):
+            value = raw_value.strip()
+            if not value:
+                values.append(None)
+                continue
+            try:
+                values.append(datetime.strptime(value, "%d-%m-%Y").strftime("%Y-%m-%d"))
+            except ValueError:
+                if show_error:
+                    messagebox.showwarning("Trial Balance", f"{label} must use DD-MM-YYYY")
+                return None
+        if values[0] and values[1] and values[0] > values[1]:
+            if show_error:
+                messagebox.showwarning("Trial Balance", "From Date cannot be after To Date")
+            return None
+        return tuple(values)
+
+    def apply_trial_date_filter(self):
+        if self.trial_date_range() is not None:
+            self.load_trial()
+
     def load_trial(self):
-        try: rows=self.client.trial_balance()
+        date_range = self.trial_date_range()
+        if date_range is None:
+            return
+        try: rows=self.client.trial_balance(*date_range)
         except Exception as exc: return messagebox.showerror("Error",str(exc))
         selected=self.view_currency.get()
         rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
@@ -312,7 +348,10 @@ class SaberApp(tk.Tk):
             title="Saber Accounting - Dashboard"; headers=["Type","Currency","Invoices","Before VAT","VAT","Total"]
             rows=[[r["kind"],r["currency"],r["count"],r["subtotal"],r["vat"],r["total"]] for r in getattr(self,"dashboard_rows",[])]
         else:
-            title="Saber Accounting - Trial Balance"; headers=["Currency","Account","Name","Debit","Credit","Balance"]
+            title="Saber Accounting - Trial Balance"
+            if self.trial_from_date.get().strip() or self.trial_to_date.get().strip():
+                title += f" ({self.trial_from_date.get().strip() or 'Beginning'} to {self.trial_to_date.get().strip() or 'Today'})"
+            headers=["Currency","Account","Name","Debit","Credit","Balance"]
             rows=[[r["currency"],r["code"],r["name_en"],r["debit"] or 0,r["credit"] or 0,r["balance"] or 0] for r in getattr(self,"trial_rows",[])]
             rows.append(["","","TOTAL",sum(float(r[3]) for r in rows),sum(float(r[4]) for r in rows),sum(float(r[5]) for r in rows)])
         if not rows: return messagebox.showwarning("Saber Accounting","No report data to export")
