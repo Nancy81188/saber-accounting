@@ -166,6 +166,14 @@ class Database:
         shutil.copy2(source, target)
         return str(target)
 
+    def save_invoice_snapshot(self, user_id):
+        backup_path = self.backup()
+        with self.connect() as db:
+            count = db.execute("SELECT COUNT(*) count FROM invoices").fetchone()["count"]
+            db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",
+                       (user_id,"save","invoices",json.dumps({"count":count,"backup":backup_path}),utcnow()))
+        return {"saved": count, "backup": backup_path}
+
     def clear_invoices(self, user_id):
         backup_path = self.backup()
         with self.connect() as db:
