@@ -90,6 +90,29 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(200, {"imported": len(ids), "ids": ids, "errors": errors, "deleted": replacement["deleted"], "backup": replacement["backup"]})
         return self._json(404, {"error": "Not found"})
 
+    def do_PUT(self):
+        path = urlparse(self.path).path
+        user = self._user()
+        if not user:
+            return self._json(401, {"error": "Unauthorized"})
+        if path.startswith("/api/invoices/"):
+            try:
+                invoice_id = int(path.rsplit("/", 1)[-1])
+            except ValueError:
+                return self._json(400, {"error": "Invalid invoice ID"})
+            try:
+                body = self._body()
+                invoice = body.get("invoice", {})
+                if not isinstance(invoice, dict):
+                    raise ValueError("Invalid invoice details")
+                updated = self.db.update_invoice(invoice_id, invoice, user["id"])
+            except KeyError:
+                return self._json(404, {"error": "Invoice not found"})
+            except Exception as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(200, {"invoice": updated})
+        return self._json(404, {"error": "Not found"})
+
 def run_server(host="0.0.0.0", port=8765, database="saber_accounting.db", admin_password="ChangeMe123!"):
     db = Database(database)
     db.initialize(admin_password)
