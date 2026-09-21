@@ -136,6 +136,21 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertNotIn("conflicting",rows[4]["currency_issue"])
             self.assertEqual(rows[5]["currency_issue"], "")
 
+    def test_trial_balance_date_range(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"dates.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            rows=[
+                {"invoice_number":"D-1","invoice_date":"01-09-2026","party_name":"A","kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111},
+                {"invoice_number":"D-2","invoice_date":"2026-09-15","party_name":"B","kind":"purchase","currency":"USD","subtotal":200,"vat":22,"total":222},
+                {"invoice_number":"D-3","invoice_date":"30-09-2026","party_name":"C","kind":"purchase","currency":"USD","subtotal":300,"vat":33,"total":333},
+            ]
+            for row in rows: db.import_invoice(row,user["id"])
+            filtered=db.trial_balance("2026-09-10","2026-09-20")
+            self.assertTrue(filtered)
+            self.assertAlmostEqual(sum(float(r["debit"] or 0) for r in filtered),222.0)
+            self.assertAlmostEqual(sum(float(r["credit"] or 0) for r in filtered),222.0)
+
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:
             rows=[["purchase","USD",2,300,33,333]]; headers=["Type","Currency","Invoices","Before VAT","VAT","Total"]
