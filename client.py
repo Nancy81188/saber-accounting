@@ -33,6 +33,7 @@ class ApiClient:
 
     def dashboard(self): return self.request("GET", "/api/dashboard")["items"]
     def invoices(self): return self.request("GET", "/api/invoices")["items"]
+    def accounts(self): return self.request("GET", "/api/accounts")["items"]
     def trial_balance(self, from_date=None, to_date=None):
         query = urlencode({key: value for key, value in {
             "from_date": from_date, "to_date": to_date
