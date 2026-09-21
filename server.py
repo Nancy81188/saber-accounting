@@ -43,6 +43,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(200, {"items": self.db.list_invoices()})
         if path == "/api/accounts":
             return self._json(200, {"items": self.db.list_accounts()})
+        if path == "/api/parties":
+            return self._json(200, {"items": self.db.list_parties()})
+        if path == "/api/statement":
+            query = parse_qs(parsed.query)
+            try:
+                party_id = int(query.get("party_id", [""])[0])
+                result = self.db.statement_of_account(
+                    party_id,
+                    query.get("from_date", [None])[0],
+                    query.get("to_date", [None])[0],
+                    query.get("currency", [None])[0],
+                )
+            except KeyError:
+                return self._json(404, {"error": "Party not found"})
+            except Exception as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(200, result)
         if path == "/api/dashboard":
             return self._json(200, {"items": self.db.dashboard()})
         if path == "/api/trial-balance":
@@ -64,6 +81,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         user = self._user()
         if not user:
             return self._json(401, {"error": "Unauthorized"})
+        if path.startswith("/api/invoices/") and path.endswith("/items"):
+            try:
+                invoice_id = int(path.split("/")[-2])
+                result = self.db.add_invoice_item(invoice_id, body.get("item", {}), user["id"])
+            except KeyError:
+                return self._json(404, {"error": "Invoice not found"})
+            except Exception as exc:
+                return self._json(400, {"error": str(exc)})
+            return self._json(201, {"invoice": result})
         if path == "/api/invoices/manual":
             invoice = body.get("invoice", {})
             items = body.get("items", [])
