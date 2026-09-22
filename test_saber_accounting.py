@@ -413,4 +413,24 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertEqual(result["deleted"],1); self.assertTrue(Path(result["backup"]).exists())
             invoices=db.list_invoices(); self.assertEqual(len(invoices),1); self.assertEqual(invoices[0]["invoice_number"],"2")
 
+    def test_opening_display_currency_dc_choices_and_linked_rate(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"currency_views.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            db.save_exchange_rate({"date_from":"01-01-2026","date_to":"31-12-2026","from_currency":"USD","to_currency":"LBP","rate":"89500"},user["id"])
+            db.save_exchange_rate({"date_from":"01-01-2026","date_to":"31-12-2026","from_currency":"EUR","to_currency":"USD","rate":"1.10"},user["id"])
+            with db.connect() as connection:
+                linked=connection.execute("SELECT CAST(rate AS REAL) rate FROM exchange_rates WHERE rate_date='20-09-2026' AND from_currency='EUR' AND to_currency='LBP'").fetchone()
+            self.assertAlmostEqual(linked["rate"],98450)
+            invoice_id=db.import_invoice({"invoice_number":"OPEN-1","invoice_date":"01-09-2026","party_name":"Supplier X","kind":"purchases","currency":"USD","deductible_subtotal":100,"non_deductible_subtotal":20,"vat":11,"total":131,"expense_no_vat_side":"C - Credit"},user["id"])
+            party=next(p for p in db.list_parties() if p["name"]=="Supplier X")
+            with_opening=db.statement_of_account(party["id"],"2026-09-10","2026-09-30",None,True,"LBP")
+            without_opening=db.statement_of_account(party["id"],"2026-09-10","2026-09-30",None,False,"LBP")
+            self.assertTrue(with_opening["opening"]); self.assertFalse(without_opening["opening"])
+            expense_id=db.add_expense({"expense_date":"20-09-2026","description":"Credit-side correction","currency":"USD","with_vat_subtotal":10,"without_vat_subtotal":5,"vat":1.1,"expense_account":"601100000","expense_without_vat_account":"601100001","vat_account":"442660000","payment_account":"531","expense_side":"C - Credit","expense_without_vat_side":"D - Debit","vat_side":"D - Debit","payment_side":"D - Debit"},user["id"])
+            lines=[r for r in db.journal(currency="USD") if r["source_type"]=="expense" and r["source_id"]==expense_id]
+            self.assertEqual(next(r for r in lines if r["account_code"]=="601100000")["credit"],10)
+            trial=db.trial_balance("2026-09-20","2026-09-20")
+            self.assertTrue(all("usd_balance" in r and "lbp_balance" in r for r in trial))
+
 if __name__ == "__main__": unittest.main()

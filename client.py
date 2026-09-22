@@ -39,9 +39,10 @@ class ApiClient:
     def save_account(self,item): return self.request("POST","/api/accounts",item)["account"]
     def rename_account(self,code,name): return self.request("PUT",f"/api/accounts/{code}",{"name_en":name})["account"]
     def parties(self): return self.request("GET", "/api/parties")["items"]
-    def statement(self, party_id, from_date=None, to_date=None, currency=None):
+    def statement(self, party_id, from_date=None, to_date=None, currency=None, include_opening=True, display_currency=None):
         query = urlencode({key:value for key,value in {
-            "party_id":party_id,"from_date":from_date,"to_date":to_date,"currency":currency
+            "party_id":party_id,"from_date":from_date,"to_date":to_date,"currency":currency,
+            "include_opening":"true" if include_opening else "false","display_currency":display_currency
         }.items() if value})
         return self.request("GET", f"/api/statement?{query}")
     def add_invoice_item(self, invoice_id, item):

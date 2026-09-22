@@ -54,15 +54,17 @@ def print_rows(title, headers, rows):
     os.startfile(handle.name, "print")
     return handle.name
 
-def export_invoice_pdf(path, invoice, items, logo_path=None):
+def export_invoice_pdf(path, invoice, items, logo_path=None, company=None):
     doc=SimpleDocTemplate(str(path),pagesize=A4,rightMargin=16*mm,leftMargin=16*mm,topMargin=12*mm,bottomMargin=12*mm)
     styles=getSampleStyleSheet(); story=[]
     if logo_path and os.path.exists(str(logo_path)):
         story.append(Image(str(logo_path),width=38*mm,height=38*mm))
+    company=company or {}; company_name=company.get("company_name") or "SABER FOR AUDIT"
+    company_line=" | ".join(value for value in (company.get("company_address") or "Zouk Mosbeh, Keserwan, Lebanon",company.get("company_phone") or "+961 70 636729",company.get("company_email") or "bassam.saber@saberforaudit.com",company.get("company_website") or "saberforaudit.com",("MOF: "+company["company_mof"]) if company.get("company_mof") else "") if value)
     story.extend([
-        Paragraph("SABER FOR AUDIT",styles["Title"]),
+        Paragraph(company_name.upper(),styles["Title"]),
         Paragraph("Accounting & Management Consulting",styles["Heading3"]),
-        Paragraph("Zouk Mosbeh, Keserwan, Lebanon | +961 70 636729 | bassam.saber@saberforaudit.com | saberforaudit.com",styles["Normal"]),
+        Paragraph(company_line,styles["Normal"]),
         Spacer(1,6*mm),
         Paragraph(f'{invoice["kind"].title()} Invoice {invoice["invoice_number"]}',styles["Heading1"]),
         Paragraph(f'Date: {invoice["invoice_date"]} &nbsp;&nbsp; Due: {invoice.get("due_date") or "-"} &nbsp;&nbsp; Currency: {invoice["currency"]}',styles["Normal"]),

@@ -81,6 +81,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                     query.get("from_date", [None])[0],
                     query.get("to_date", [None])[0],
                     query.get("currency", [None])[0],
+                    query.get("include_opening", ["true"])[0].lower() == "true",
+                    query.get("display_currency", [None])[0],
                 )
             except KeyError:
                 return self._json(404, {"error": "Party not found"})
