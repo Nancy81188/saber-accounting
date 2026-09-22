@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 import sys
+import mimetypes
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -46,6 +47,9 @@ class SaberApp(tk.Tk):
         self.statement_currency = tk.StringVar(value="All Currencies")
         self.journal_from_date = tk.StringVar()
         self.journal_to_date = tk.StringVar()
+        self.pnl_from_date = tk.StringVar(value=f"01-01-{datetime.now().year}")
+        self.pnl_to_date = tk.StringVar(value=f"31-12-{datetime.now().year}")
+        self.close_year = tk.StringVar(value=str(datetime.now().year))
         self._style()
         self.login_screen()
 
@@ -76,7 +80,10 @@ class SaberApp(tk.Tk):
         fields = [("server", self.server, False), ("username", self.username, False), ("password", self.password, True)]
         for row,(key,var,secret) in enumerate(fields, 2):
             tk.Label(card, text=tr("en",key), bg="white", anchor="w").grid(row=row,column=0,sticky="w",pady=7,padx=(0,14))
-            tk.Entry(card,textvariable=var,width=34,show="*" if secret else "").grid(row=row,column=1,pady=7)
+            entry=tk.Entry(card,textvariable=var,width=34,show="*" if secret else "")
+            entry.grid(row=row,column=1,pady=7)
+            if secret:
+                entry.bind("<Return>",lambda _event:self.login())
         tk.Label(card,text="Language",bg="white").grid(row=5,column=0,sticky="w",pady=7)
         ttk.Combobox(card,textvariable=self.language,values=["en","ar","fr"],state="readonly",width=31).grid(row=5,column=1,pady=7)
         tk.Button(card,text="Sign in",command=self.login,bg=NAVY,fg="white",activebackground=GOLD,width=29,pady=8,border=0).grid(row=6,column=0,columnspan=2,pady=(22,0))
@@ -99,16 +106,16 @@ class SaberApp(tk.Tk):
         tk.Label(top,text=tr(lang,"title"),bg=NAVY,fg="white",font=("Segoe UI",20,"bold")).pack(side="left",padx=8,pady=19)
         tk.Label(top,text="11% VAT  |  USD · LBP · EUR · AED",bg=NAVY,fg=GOLD,font=("Segoe UI",10,"bold")).pack(side="right",padx=28)
         notebook=ttk.Notebook(self); notebook.pack(fill="both",expand=True,padx=18,pady=16)
-        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT)
-        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text="Manual Entry"); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.journal_tab,text="General Journal"); notebook.add(self.trial_tab,text="Trial Balance"); notebook.add(self.statement_tab,text="Statement of Account"); notebook.add(self.accounts_tab,text="Lebanese Chart of Accounts")
+        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT)
+        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text="Manual Entry"); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.journal_tab,text="General Journal"); notebook.add(self.trial_tab,text="Trial Balance"); notebook.add(self.pnl_tab,text="Profit & Loss"); notebook.add(self.statement_tab,text="Statement of Account"); notebook.add(self.accounts_tab,text="Lebanese Chart of Accounts")
         filter_bar=tk.Frame(self,bg=LIGHT); filter_bar.pack(fill="x",padx=28)
         tk.Label(filter_bar,text="Show currency:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
         currency_filter=ttk.Combobox(filter_bar,textvariable=self.view_currency,values=["All Currencies","USD","EUR","LBP","AED"],state="readonly",width=16)
         currency_filter.pack(side="left",padx=8); currency_filter.bind("<<ComboboxSelected>>",lambda _event:self.currency_changed())
-        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_journal(); self.build_trial(); self.build_statement(); self.build_accounts()
+        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_journal(); self.build_trial(); self.build_profit_loss(); self.build_statement(); self.build_accounts()
 
     def currency_changed(self):
-        self.load_dashboard(); self.load_invoices(); self.load_journal(); self.load_trial()
+        self.load_dashboard(); self.load_invoices(); self.load_journal(); self.load_trial(); self.load_profit_loss()
 
     def table(self,parent,columns):
         search_bar=tk.Frame(parent,bg=LIGHT); search_bar.pack(fill="x",padx=10,pady=(10,0))
@@ -181,7 +188,7 @@ class SaberApp(tk.Tk):
         for r in rows: self.dashboard_tree.insert("", "end", values=(r["kind"],r["currency"],r["count"],f'{r["subtotal"]:,.2f}',f'{r["vat"]:,.2f}',f'{r["total"]:,.2f}',f'{r["debit"]:,.2f}',f'{r["credit"]:,.2f}'))
 
     def build_invoices(self):
-        l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),105),("date",tr(l,"date"),100),("party",tr(l,"party"),200),("kind","Type",75),("currency",tr(l,"currency"),70),("subtotal",tr(l,"before_vat"),100),("vat",tr(l,"vat"),85),("total",tr(l,"total"),100),("debit","Debit",100),("credit","Credit",100),("supplier_account","Supplier A/C",90),("vat_account","VAT A/C",80),("expense_account","Expense A/C",90),("status","Status",80),("row",tr(l,"source_row"),70)])
+        l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),105),("date",tr(l,"date"),95),("due","Due Date",95),("party",tr(l,"party"),180),("kind","Type",70),("currency",tr(l,"currency"),65),("total",tr(l,"total"),95),("paid","Paid",90),("outstanding","Outstanding",100),("payment","Payment",85),("debit","Debit",95),("credit","Credit",95),("status","Status",80),("attachments","Files",55)])
         invoice_actions=tk.Frame(self.invoices_tab,bg=LIGHT); invoice_actions.pack(pady=(0,10))
         tk.Button(invoice_actions,text=tr(l,"refresh"),command=self.load_invoices,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(side="left",padx=4)
         tk.Button(invoice_actions,text="Save Data",command=self.confirm_invoice_data_saved,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
@@ -190,6 +197,12 @@ class SaberApp(tk.Tk):
         tk.Button(invoice_actions,text="Add Item",command=self.add_item_to_selected_invoice,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
         tk.Button(invoice_actions,text="Edit Selected",command=self.edit_selected_invoice,bg=GOLD,fg=NAVY,
                   font=("Segoe UI",9,"bold"),border=0,padx=20,pady=7).pack(side="left",padx=4)
+        lifecycle=tk.Frame(self.invoices_tab,bg=LIGHT); lifecycle.pack(pady=(0,8))
+        self.action_button(lifecycle,"Duplicate",self.duplicate_selected_invoice).pack(side="left",padx=4)
+        tk.Button(lifecycle,text="Cancel Invoice",command=self.cancel_selected_invoice,bg="#8B1E1E",fg="white",border=0,padx=15,pady=7).pack(side="left",padx=4)
+        self.action_button(lifecycle,"Attach PDF / Image",self.attach_to_selected_invoice).pack(side="left",padx=4)
+        self.action_button(lifecycle,"Attachments",self.show_selected_attachments).pack(side="left",padx=4)
+        self.action_button(lifecycle,"History",self.show_invoice_history).pack(side="left",padx=4)
         self.invoice_tree.bind("<Double-1>",lambda _event:self.edit_selected_invoice())
         self.load_invoices()
 
@@ -200,7 +213,7 @@ class SaberApp(tk.Tk):
         rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
         self.invoice_rows={str(r["id"]):r for r in rows}
         self.invoice_tree.delete(*self.invoice_tree.get_children())
-        for r in rows: self.invoice_tree.insert("","end",iid=str(r["id"]),values=(r["invoice_number"],r["invoice_date"],r["party_name"],r["kind"],r["currency"],r["subtotal"],r["vat"],r["total"],r["debit"],r["credit"],r["supplier_account"],r["vat_account"],r["expense_account"],r["status"],r["source_row"]))
+        for r in rows: self.invoice_tree.insert("","end",iid=str(r["id"]),values=(r["invoice_number"],r["invoice_date"],r.get("due_date") or "",r["party_name"],r["kind"],r["currency"],r["total"],r.get("amount_paid",0),r.get("outstanding",0),r.get("payment_status","unpaid"),r["debit"],r["credit"],r["status"],r.get("attachment_count",0)))
 
     def edit_selected_invoice(self):
         selected=self.invoice_tree.selection()
@@ -225,6 +238,8 @@ class SaberApp(tk.Tk):
             "vat_account":tk.StringVar(value=row["vat_account"]),
             "expense_account":tk.StringVar(value=row["expense_account"]),
             "status":tk.StringVar(value=row["status"]),
+            "due_date":tk.StringVar(value=row.get("due_date") or ""),
+            "amount_paid":tk.StringVar(value=row.get("amount_paid") or "0"),
         }
         fields=[
             ("Invoice Number","invoice_number"),("Date (DD-MM-YYYY)","invoice_date"),
@@ -232,6 +247,7 @@ class SaberApp(tk.Tk):
             ("Before VAT","subtotal"),("VAT","vat"),("Total","total"),
             ("Supplier Account","supplier_account"),("VAT Account","vat_account"),
             ("Expense Account","expense_account"),("Status","status"),
+            ("Due Date (DD-MM-YYYY)","due_date"),("Amount Paid","amount_paid"),
         ]
         for index,(label,key) in enumerate(fields):
             grid_row=index//2; grid_column=(index%2)*2
@@ -259,10 +275,13 @@ class SaberApp(tk.Tk):
                     return messagebox.showwarning("Invoices","Date must use DD-MM-YYYY",parent=window)
             try:
                 subtotal=float(values["subtotal"]); vat=float(values["vat"]); total=float(values["total"])
+                amount_paid=float(values["amount_paid"] or 0)
             except ValueError:
                 return messagebox.showwarning("Invoices","Before VAT, VAT, and Total must be valid numbers",parent=window)
             if abs((subtotal+vat)-total)>0.005:
                 return messagebox.showwarning("Invoices","Total must equal Before VAT plus VAT",parent=window)
+            if amount_paid<0 or amount_paid>total:
+                return messagebox.showwarning("Invoices","Amount paid must be between zero and Total",parent=window)
             try:
                 self.client.update_invoice(int(invoice_id),values)
             except Exception as exc:
@@ -275,6 +294,84 @@ class SaberApp(tk.Tk):
         tk.Button(buttons,text="Save Update",command=save_update,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),
                   border=0,padx=24,pady=8).pack(side="left",padx=5)
         tk.Button(buttons,text="Cancel",command=window.destroy,bg=NAVY,fg="white",border=0,padx=20,pady=8).pack(side="left",padx=5)
+
+    def selected_invoice_id(self):
+        selected=self.invoice_tree.selection()
+        if not selected:
+            messagebox.showwarning("Invoices","Select one invoice row first"); return None
+        return int(selected[0])
+
+    def duplicate_selected_invoice(self):
+        invoice_id=self.selected_invoice_id()
+        if invoice_id is None: return
+        try: created=self.client.duplicate_invoice(invoice_id)
+        except Exception as exc: return messagebox.showerror("Invoices",str(exc))
+        self.load_invoices(); self.load_dashboard(); self.load_journal(); self.load_trial()
+        messagebox.showinfo("Invoices",f'Invoice duplicated as {created["invoice_number"]}')
+
+    def cancel_selected_invoice(self):
+        invoice_id=self.selected_invoice_id()
+        if invoice_id is None: return
+        row=self.invoice_rows.get(str(invoice_id),{})
+        if row.get("status")=="cancelled": return messagebox.showwarning("Invoices","Invoice is already cancelled")
+        window=tk.Toplevel(self); window.title("Cancel Invoice"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
+        reason=tk.StringVar()
+        tk.Label(window,text="Cancellation reason:",bg=LIGHT).grid(row=0,column=0,padx=14,pady=14)
+        tk.Entry(window,textvariable=reason,width=45).grid(row=0,column=1,padx=14,pady=14)
+        def confirm():
+            if not reason.get().strip(): return messagebox.showwarning("Cancel Invoice","Enter a cancellation reason",parent=window)
+            try: self.client.cancel_invoice(invoice_id,reason.get().strip())
+            except Exception as exc: return messagebox.showerror("Cancel Invoice",str(exc),parent=window)
+            window.destroy(); self.load_invoices(); self.load_dashboard(); self.load_journal(); self.load_trial()
+            messagebox.showinfo("Cancel Invoice","Invoice cancelled and reversing journal entry created")
+        tk.Button(window,text="Confirm Cancellation",command=confirm,bg="#8B1E1E",fg="white",border=0,padx=18,pady=7).grid(row=1,column=0,columnspan=2,pady=12)
+
+    def attach_to_selected_invoice(self):
+        invoice_id=self.selected_invoice_id()
+        if invoice_id is None: return
+        path=filedialog.askopenfilename(filetypes=[("Invoice files","*.pdf *.png *.jpg *.jpeg"),("All files","*.*")])
+        if not path: return
+        try:
+            content=Path(path).read_bytes()
+            mime=mimetypes.guess_type(path)[0] or "application/octet-stream"
+            self.client.upload_attachment(invoice_id,Path(path).name,mime,content)
+        except Exception as exc: return messagebox.showerror("Attachments",str(exc))
+        self.load_invoices(); messagebox.showinfo("Attachments","File attached successfully")
+
+    def show_selected_attachments(self):
+        invoice_id=self.selected_invoice_id()
+        if invoice_id is None: return
+        try: items=self.client.attachments(invoice_id)
+        except Exception as exc: return messagebox.showerror("Attachments",str(exc))
+        if not items: return messagebox.showinfo("Attachments","This invoice has no attachments")
+        window=tk.Toplevel(self); window.title("Invoice Attachments"); window.geometry("620x340")
+        tree=ttk.Treeview(window,columns=("name","type","size","date"),show="headings")
+        for key,label,width in (("name","File Name",240),("type","Type",140),("size","Size",80),("date","Uploaded",140)):
+            tree.heading(key,text=label); tree.column(key,width=width)
+        for item in items: tree.insert("","end",iid=str(item["id"]),values=(item["file_name"],item["mime_type"],f'{item["size"]/1024:,.1f} KB',item["uploaded_at"][:19]))
+        tree.pack(fill="both",expand=True,padx=10,pady=10)
+        def download():
+            selected=tree.selection()
+            if not selected: return messagebox.showwarning("Attachments","Select one file",parent=window)
+            record=next(item for item in items if str(item["id"])==selected[0])
+            path=filedialog.asksaveasfilename(initialfile=record["file_name"],parent=window)
+            if not path: return
+            try: Path(path).write_bytes(self.client.download_attachment(record["id"])["content"])
+            except Exception as exc: return messagebox.showerror("Attachments",str(exc),parent=window)
+            messagebox.showinfo("Attachments",f"Saved successfully:\n{path}",parent=window)
+        self.action_button(window,"Download Selected",download).pack(pady=(0,10))
+
+    def show_invoice_history(self):
+        invoice_id=self.selected_invoice_id()
+        if invoice_id is None: return
+        try: items=self.client.invoice_history(invoice_id)
+        except Exception as exc: return messagebox.showerror("History",str(exc))
+        window=tk.Toplevel(self); window.title("Invoice Modification History"); window.geometry("760x380")
+        tree=ttk.Treeview(window,columns=("date","user","action","details"),show="headings")
+        for key,label,width in (("date","Date",170),("user","User",100),("action","Action",100),("details","Details",370)):
+            tree.heading(key,text=label); tree.column(key,width=width)
+        for item in items: tree.insert("","end",values=(item["created_at"][:19],item.get("username") or "",item["action"],item.get("details") or ""))
+        tree.pack(fill="both",expand=True,padx=10,pady=10)
 
     def confirm_invoice_data_saved(self):
         try:
@@ -304,11 +401,13 @@ class SaberApp(tk.Tk):
         window=tk.Toplevel(self); window.title("Add Invoice Row"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
         defaults={"invoice_number":"","invoice_date":datetime.now().strftime("%d-%m-%Y"),"party_name":"",
                   "kind":"purchase","currency":"USD","subtotal":"0","vat":"0","total":"0",
-                  "supplier_account":"4011","vat_account":"4426.6","expense_account":"6011"}
+                  "supplier_account":"4011","vat_account":"4426.6","expense_account":"6011",
+                  "due_date":"","amount_paid":"0"}
         variables={key:tk.StringVar(value=value) for key,value in defaults.items()}
         fields=[("Invoice Number","invoice_number"),("Date (DD-MM-YYYY)","invoice_date"),("Customer / Supplier","party_name"),
                 ("Type","kind"),("Currency","currency"),("Before VAT","subtotal"),("VAT","vat"),("Total","total"),
-                ("Supplier Account","supplier_account"),("VAT Account","vat_account"),("Expense Account","expense_account")]
+                ("Supplier Account","supplier_account"),("VAT Account","vat_account"),("Expense Account","expense_account"),
+                ("Due Date (DD-MM-YYYY)","due_date"),("Amount Paid","amount_paid")]
         for index,(label,key) in enumerate(fields):
             rr=index//2; cc=(index%2)*2
             tk.Label(window,text=label,bg=LIGHT).grid(row=rr,column=cc,sticky="w",padx=(14,5),pady=7)
@@ -323,15 +422,15 @@ class SaberApp(tk.Tk):
                 subtotal=float(values["subtotal"]); vat=float(values["vat"]); total=float(values["total"])
             except ValueError:
                 return messagebox.showwarning("Invoices","Check the date and amounts",parent=window)
-            if not values["invoice_number"] or not values["party_name"] or abs(subtotal+vat-total)>0.005:
-                return messagebox.showwarning("Invoices","Complete required fields; Total must equal Before VAT plus VAT",parent=window)
+            if not values["party_name"] or abs(subtotal+vat-total)>0.005:
+                return messagebox.showwarning("Invoices","Enter customer/supplier; Total must equal Before VAT plus VAT",parent=window)
             item={"description":"Manual invoice row","quantity":1,"unit_price":subtotal,"subtotal":subtotal,
                   "vat_rate":0 if subtotal==0 else vat*100/subtotal,"vat":vat,"total":total}
             try: self.client.create_manual_invoice(values,[item])
             except Exception as exc: return messagebox.showerror("Invoices",str(exc),parent=window)
             window.destroy(); self.load_invoices(); self.load_dashboard(); self.load_journal(); self.load_trial(); self.load_statement_parties()
             messagebox.showinfo("Invoices","Invoice row added successfully")
-        tk.Button(window,text="Save Invoice",command=save,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=24,pady=8).grid(row=6,column=0,columnspan=4,pady=16)
+        tk.Button(window,text="Save Invoice",command=save,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=24,pady=8).grid(row=7,column=0,columnspan=4,pady=16)
 
     def add_item_to_selected_invoice(self):
         selected=self.invoice_tree.selection()
@@ -485,8 +584,8 @@ class SaberApp(tk.Tk):
                  "vat_account":self.manual_vat_account.get().strip() or "4426.6",
                  "expense_account":self.manual_expense_account.get().strip() or "6011",
                  "source_file":"Manual Entry","source_row":None}
-        if not all((invoice["invoice_number"],invoice["invoice_date"],invoice["party_name"])):
-            return messagebox.showwarning("Manual Entry","Enter invoice number, date, and customer/supplier")
+        if not all((invoice["invoice_date"],invoice["party_name"])):
+            return messagebox.showwarning("Manual Entry","Enter date and customer/supplier; invoice number can be automatic")
         if not self.manual_items: return messagebox.showwarning("Manual Entry","Add at least one invoice item")
         try: self.client.create_manual_invoice(invoice,self.manual_items)
         except Exception as exc: return messagebox.showerror("Manual Entry",str(exc))
@@ -604,6 +703,78 @@ class SaberApp(tk.Tk):
             (export_excel if format_name=="xlsx" else export_pdf)(path,title,headers,values)
             messagebox.showinfo("General Journal",f"Saved successfully:\n{path}")
         except Exception as exc: messagebox.showerror("General Journal",str(exc))
+
+    def build_profit_loss(self):
+        controls=tk.Frame(self.pnl_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=10)
+        tk.Label(controls,text="From:",bg=LIGHT).pack(side="left")
+        tk.Entry(controls,textvariable=self.pnl_from_date,width=13).pack(side="left",padx=(4,10))
+        tk.Label(controls,text="To:",bg=LIGHT).pack(side="left")
+        tk.Entry(controls,textvariable=self.pnl_to_date,width=13).pack(side="left",padx=(4,10))
+        tk.Button(controls,text="Apply",command=self.load_profit_loss,bg=GOLD,fg=NAVY,border=0,padx=15,pady=6).pack(side="left")
+        tk.Label(controls,text="Close Fiscal Year:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="right",padx=(10,4))
+        tk.Entry(controls,textvariable=self.close_year,width=8).pack(side="right")
+        tk.Button(controls,text="Close Year & Open Next",command=self.close_fiscal_year,bg="#8B1E1E",fg="white",border=0,padx=14,pady=6).pack(side="right",padx=6)
+        self.pnl_tree=self.table(self.pnl_tab,[("currency","Currency",85),("type","Type",90),("account","Account",100),
+            ("name","Account Name",300),("debit","Debit",130),("credit","Credit",130),("amount","P&L Amount",140)])
+        actions=tk.Frame(self.pnl_tab,bg=LIGHT); actions.pack(pady=(0,10))
+        self.action_button(actions,"Export Excel",lambda:self.profit_loss_report("xlsx")).pack(side="left",padx=4)
+        self.action_button(actions,"Export PDF",lambda:self.profit_loss_report("pdf")).pack(side="left",padx=4)
+        self.action_button(actions,"Print",lambda:self.profit_loss_report("print")).pack(side="left",padx=4)
+        self.pnl_totals=tk.Label(actions,text="",bg=LIGHT,font=("Segoe UI",10,"bold")); self.pnl_totals.pack(side="left",padx=15)
+        self.load_profit_loss()
+
+    def profit_loss_range(self):
+        values=[]
+        for label,raw in (("From Date",self.pnl_from_date.get()),("To Date",self.pnl_to_date.get())):
+            try: values.append(datetime.strptime(raw.strip(),"%d-%m-%Y").strftime("%Y-%m-%d"))
+            except ValueError: messagebox.showwarning("Profit & Loss",f"{label} must use DD-MM-YYYY"); return None
+        if values[0]>values[1]: messagebox.showwarning("Profit & Loss","From Date cannot be after To Date"); return None
+        return values
+
+    def load_profit_loss(self):
+        if not hasattr(self,"pnl_tree"): return
+        dates=self.profit_loss_range()
+        if dates is None: return
+        currency=None if self.view_currency.get()=="All Currencies" else self.view_currency.get()
+        try: rows=self.client.profit_loss(dates[0],dates[1],currency)
+        except Exception as exc: return messagebox.showerror("Profit & Loss",str(exc))
+        self.pnl_rows=rows; self.pnl_tree.delete(*self.pnl_tree.get_children())
+        for row in rows: self.pnl_tree.insert("","end",values=(row["currency"],row["type"],row["code"],row["name_en"],
+            f'{row["debit"]:,.2f}',f'{row["credit"]:,.2f}',f'{row["amount"]:,.2f}'))
+        totals={}
+        for row in rows:
+            totals.setdefault(row["currency"],0)
+            totals[row["currency"]]+=row["amount"] if row["type"]=="income" else -row["amount"]
+        self.pnl_totals.config(text="   ".join(f"{code} Net P&L: {amount:,.2f}" for code,amount in totals.items()) or "No activity")
+
+    def profit_loss_report(self,format_name):
+        rows=getattr(self,"pnl_rows",[])
+        if not rows: return messagebox.showwarning("Profit & Loss","No data to export")
+        title=f"Saber Accounting - Profit & Loss ({self.pnl_from_date.get()} to {self.pnl_to_date.get()})"
+        headers=["Currency","Type","Account","Account Name","Debit","Credit","P&L Amount"]
+        values=[[r["currency"],r["type"],r["code"],r["name_en"],r["debit"],r["credit"],r["amount"]] for r in rows]
+        try:
+            if format_name=="print": print_rows(title,headers,values); return
+            extension=".xlsx" if format_name=="xlsx" else ".pdf"
+            path=filedialog.asksaveasfilename(defaultextension=extension,initialfile="Profit_and_Loss"+extension,
+                filetypes=[("Excel workbook","*.xlsx")] if format_name=="xlsx" else [("PDF document","*.pdf")])
+            if not path: return
+            (export_excel if format_name=="xlsx" else export_pdf)(path,title,headers,values)
+            messagebox.showinfo("Profit & Loss",f"Saved successfully:\n{path}")
+        except Exception as exc: messagebox.showerror("Profit & Loss",str(exc))
+
+    def close_fiscal_year(self):
+        try: year=int(self.close_year.get())
+        except ValueError: return messagebox.showwarning("Fiscal Year","Enter a valid four-digit year")
+        if year<2000 or year>2100: return messagebox.showwarning("Fiscal Year","Enter a valid four-digit year")
+        warning=f"Close fiscal year {year}?\n\nIncome and expense accounts will be closed to retained results, and fiscal year {year+1} will be opened. This cannot be repeated."
+        if not messagebox.askyesno("Close Fiscal Year",warning): return
+        try: result=self.client.close_fiscal_year(year)
+        except Exception as exc: return messagebox.showerror("Close Fiscal Year",str(exc))
+        self.pnl_from_date.set(f"01-01-{year+1}"); self.pnl_to_date.set(f"31-12-{year+1}"); self.close_year.set(str(year+1))
+        self.load_profit_loss(); self.load_journal(); self.load_trial()
+        summary=" / ".join(f"{code}: {amount:,.2f}" for code,amount in result.get("net_results",{}).items()) or "No P&L activity"
+        messagebox.showinfo("Fiscal Year",f"Year {year} closed successfully.\nYear {year+1} opened.\nNet results: {summary}")
 
     def build_statement(self):
         controls=tk.Frame(self.statement_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=10)

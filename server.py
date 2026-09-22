@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +42,20 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "Unauthorized"})
         if path == "/api/invoices":
             return self._json(200, {"items": self.db.list_invoices()})
+        if path.startswith("/api/invoices/") and path.endswith("/history"):
+            try: invoice_id=int(path.split("/")[-2]); items=self.db.invoice_history(invoice_id)
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"items":items})
+        if path.startswith("/api/invoices/") and path.endswith("/attachments"):
+            try: invoice_id=int(path.split("/")[-2]); items=self.db.list_attachments(invoice_id)
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"items":items})
+        if path.startswith("/api/attachments/"):
+            try:
+                attachment=self.db.get_attachment(int(path.rsplit("/",1)[-1]))
+                attachment["content"]=base64.b64encode(attachment["content"]).decode("ascii")
+            except KeyError: return self._json(404,{"error":"Attachment not found"})
+            return self._json(200,attachment)
         if path == "/api/accounts":
             return self._json(200, {"items": self.db.list_accounts()})
         if path == "/api/parties":
@@ -74,6 +89,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 query.get("to_date", [None])[0],
                 query.get("currency", [None])[0],
             )})
+        if path == "/api/profit-loss":
+            query=parse_qs(parsed.query)
+            return self._json(200,{"items":self.db.profit_and_loss(query.get("from_date",[None])[0],query.get("to_date",[None])[0],query.get("currency",[None])[0])})
+        if path == "/api/fiscal-years":
+            return self._json(200,{"items":self.db.list_fiscal_years()})
         return self._json(404, {"error": "Not found"})
 
     def do_POST(self):
@@ -97,12 +117,33 @@ class ApiHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._json(400, {"error": str(exc)})
             return self._json(201, {"invoice": result})
+        if path.startswith("/api/invoices/") and path.endswith("/cancel"):
+            try: result=self.db.cancel_invoice(int(path.split("/")[-2]),body.get("reason"),user["id"])
+            except KeyError: return self._json(404,{"error":"Invoice not found"})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"invoice":result})
+        if path.startswith("/api/invoices/") and path.endswith("/duplicate"):
+            try: result=self.db.duplicate_invoice(int(path.split("/")[-2]),user["id"])
+            except KeyError: return self._json(404,{"error":"Invoice not found"})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"invoice":result})
+        if path.startswith("/api/invoices/") and path.endswith("/attachments"):
+            try:
+                raw=base64.b64decode(body.get("content","").encode("ascii"),validate=True)
+                attachment_id=self.db.add_attachment(int(path.split("/")[-2]),body.get("file_name"),body.get("mime_type"),raw,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"attachment_id":attachment_id})
+        if path == "/api/fiscal-years/close":
+            if user["role"] != "admin": return self._json(403,{"error":"Administrator permission required"})
+            try: result=self.db.close_fiscal_year(body.get("year"),user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
         if path == "/api/invoices/manual":
             invoice = body.get("invoice", {})
             items = body.get("items", [])
             if not isinstance(invoice, dict) or not isinstance(items, list) or len(items) > 500:
                 return self._json(400, {"error": "Invalid manual invoice"})
-            required = ("invoice_number", "invoice_date", "party_name", "kind", "currency")
+            required = ("invoice_date", "party_name", "kind", "currency")
             missing = [field for field in required if not str(invoice.get(field) or "").strip()]
             if missing:
                 return self._json(400, {"error": "Missing fields: " + ", ".join(missing)})

@@ -1,5 +1,5 @@
 #define MyAppName "Saber Accounting"
-#define MyAppVersion "0.8.0"
+#define MyAppVersion "0.9.0"
 #define MyAppPublisher "Saber for Audit"
 
 [Setup]
@@ -31,4 +31,3 @@ Name: "{autoprograms}\Saber Accounting Shared Server"; Filename: "{app}\SaberAcc
 
 [Run]
 Filename: "{app}\SaberAccounting.exe"; Description: "Open Saber Accounting"; Flags: nowait postinstall skipifsilent
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -57,3 +58,17 @@ class ApiClient:
     def import_invoices(self, items, replace_existing=True): return self.request("POST", "/api/invoices/import", {"items": items, "replace_existing": replace_existing})
     def create_manual_invoice(self, invoice, items): return self.request("POST", "/api/invoices/manual", {"invoice": invoice, "items": items})
     def update_invoice(self, invoice_id, invoice): return self.request("PUT", f"/api/invoices/{invoice_id}", {"invoice": invoice})
+    def cancel_invoice(self, invoice_id, reason): return self.request("POST",f"/api/invoices/{invoice_id}/cancel",{"reason":reason})["invoice"]
+    def duplicate_invoice(self, invoice_id): return self.request("POST",f"/api/invoices/{invoice_id}/duplicate",{})["invoice"]
+    def invoice_history(self, invoice_id): return self.request("GET",f"/api/invoices/{invoice_id}/history")["items"]
+    def attachments(self, invoice_id): return self.request("GET",f"/api/invoices/{invoice_id}/attachments")["items"]
+    def upload_attachment(self, invoice_id, file_name, mime_type, content):
+        return self.request("POST",f"/api/invoices/{invoice_id}/attachments",{
+            "file_name":file_name,"mime_type":mime_type,"content":base64.b64encode(content).decode("ascii")})
+    def download_attachment(self, attachment_id):
+        result=self.request("GET",f"/api/attachments/{attachment_id}"); result["content"]=base64.b64decode(result["content"]); return result
+    def profit_loss(self, from_date=None, to_date=None, currency=None):
+        query=urlencode({k:v for k,v in {"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v})
+        return self.request("GET","/api/profit-loss"+(f"?{query}" if query else ""))["items"]
+    def fiscal_years(self): return self.request("GET","/api/fiscal-years")["items"]
+    def close_fiscal_year(self, year): return self.request("POST","/api/fiscal-years/close",{"year":year})

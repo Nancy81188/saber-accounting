@@ -117,6 +117,47 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertAlmostEqual(sum(row["credit"] for row in journal),333.0)
             self.assertTrue(all("balance" in row for row in journal))
 
+    def test_professional_invoice_lifecycle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"lifecycle.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            invoice={"invoice_number":"","invoice_date":"22-09-2026","party_name":"Customer A","kind":"sale","currency":"USD"}
+            invoice_id=db.create_manual_invoice(invoice,[{"description":"Service","quantity":1,"unit_price":100,"vat_rate":11}],user["id"])
+            saved=db.get_invoice(invoice_id)
+            self.assertEqual(saved["invoice_number"],"SAL-2026-000001")
+            self.assertEqual(saved["payment_status"],"unpaid")
+            updated=db.update_invoice(invoice_id,{**saved,"amount_paid":50,"status":"posted"},user["id"])
+            self.assertEqual(updated["payment_status"],"partial")
+            self.assertEqual(updated["outstanding"],61.0)
+            duplicate=db.duplicate_invoice(invoice_id,user["id"])
+            self.assertEqual(duplicate["invoice_number"],"SAL-2026-000002")
+            cancelled=db.cancel_invoice(invoice_id,"Customer request",user["id"])
+            self.assertEqual(cancelled["status"],"cancelled")
+            journal=db.journal(currency="USD")
+            debit=sum(row["debit"] for row in journal); credit=sum(row["credit"] for row in journal)
+            self.assertAlmostEqual(debit,credit)
+            self.assertTrue(any(row["entry_number"].startswith("REV-") for row in journal))
+            attachment_id=db.add_attachment(duplicate["id"],"invoice.pdf","application/pdf",b"PDF",user["id"])
+            self.assertEqual(db.get_attachment(attachment_id)["content"],b"PDF")
+            self.assertGreaterEqual(len(db.invoice_history(invoice_id)),2)
+
+    def test_profit_loss_and_close_fiscal_year(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"year.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            db.import_invoice({"invoice_number":"S-1","invoice_date":"15-06-2026","party_name":"Client","kind":"sale","currency":"USD","subtotal":1000,"vat":110,"total":1110},user["id"])
+            db.import_invoice({"invoice_number":"P-1","invoice_date":"20-06-2026","party_name":"Supplier","kind":"purchase","currency":"USD","subtotal":400,"vat":44,"total":444},user["id"])
+            pnl=db.profit_and_loss("2026-01-01","2026-12-31","USD")
+            income=sum(row["amount"] for row in pnl if row["type"]=="income")
+            expenses=sum(row["amount"] for row in pnl if row["type"]=="expense")
+            self.assertEqual(income-expenses,600.0)
+            result=db.close_fiscal_year(2026,user["id"])
+            self.assertEqual(result["opened_year"],2027)
+            self.assertEqual(result["net_results"]["USD"],600.0)
+            self.assertEqual(db.profit_and_loss("2027-01-01","2027-12-31","USD"),[])
+            years={row["year"]:row["status"] for row in db.list_fiscal_years()}
+            self.assertEqual(years[2026],"closed"); self.assertEqual(years[2027],"open")
+
     def test_manual_invoice_items_editable_subtotal_and_vat(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"manual.db"); db.initialize("secret")

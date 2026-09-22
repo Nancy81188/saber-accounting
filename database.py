@@ -33,13 +33,19 @@ CREATE TABLE IF NOT EXISTS invoices (
  invoice_date TEXT, party_id INTEGER REFERENCES parties(id), currency TEXT NOT NULL, exchange_rate TEXT NOT NULL DEFAULT '1',
  subtotal TEXT, vat TEXT, total TEXT, status TEXT NOT NULL DEFAULT 'posted', currency_issue TEXT NOT NULL DEFAULT '',
  supplier_account TEXT NOT NULL DEFAULT '4011', vat_account TEXT NOT NULL DEFAULT '4426.6', expense_account TEXT NOT NULL DEFAULT '6011',
- source_file TEXT, source_row INTEGER,
+ source_file TEXT, source_row INTEGER, due_date TEXT, payment_status TEXT NOT NULL DEFAULT 'unpaid',
+ amount_paid TEXT NOT NULL DEFAULT '0', cancelled_at TEXT, cancellation_reason TEXT,
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS invoice_items (
  id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
  description TEXT NOT NULL, quantity TEXT NOT NULL, unit_price TEXT NOT NULL,
  subtotal TEXT NOT NULL, vat_rate TEXT NOT NULL, vat TEXT NOT NULL, total TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invoice_attachments (
+ id INTEGER PRIMARY KEY, invoice_id INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+ file_name TEXT NOT NULL, mime_type TEXT NOT NULL, content BLOB NOT NULL,
+ uploaded_by INTEGER REFERENCES users(id), uploaded_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS journal_entries (
  id INTEGER PRIMARY KEY, entry_number TEXT NOT NULL UNIQUE, entry_date TEXT, description TEXT, source_type TEXT,
@@ -59,6 +65,10 @@ CREATE TABLE IF NOT EXISTS stock_movements (
 CREATE TABLE IF NOT EXISTS audit_log (
  id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), action TEXT NOT NULL, entity TEXT NOT NULL,
  entity_id INTEGER, details TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fiscal_years (
+ id INTEGER PRIMARY KEY, year INTEGER NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'open',
+ opened_at TEXT NOT NULL, closed_at TEXT, closed_by INTEGER REFERENCES users(id), details TEXT
 );
 """
 
@@ -119,6 +129,16 @@ class Database:
                         f"ALTER TABLE invoices ADD COLUMN {column} "
                         f"TEXT NOT NULL DEFAULT '{default_code}'"
                     )
+            lifecycle_columns = {
+                "due_date": "TEXT",
+                "payment_status": "TEXT NOT NULL DEFAULT 'unpaid'",
+                "amount_paid": "TEXT NOT NULL DEFAULT '0'",
+                "cancelled_at": "TEXT",
+                "cancellation_reason": "TEXT",
+            }
+            for column, definition in lifecycle_columns.items():
+                if column not in invoice_columns:
+                    db.execute(f"ALTER TABLE invoices ADD COLUMN {column} {definition}")
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
             db.executemany("""INSERT INTO accounts(code,name_en,name_ar,name_fr,type)
                 VALUES(?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET
@@ -157,6 +177,23 @@ class Database:
     def _account_id(self, db, code):
         row = db.execute("SELECT id FROM accounts WHERE code=?", (code,)).fetchone()
         return row["id"]
+
+    def next_invoice_number(self, kind="sale", invoice_date=None):
+        prefix = "SAL" if kind == "sale" else "PUR"
+        year = str(invoice_date or datetime.now().year)
+        if "-" in year:
+            year = year[-4:] if year[:4].isdigit() is False else year[:4]
+        if not year.isdigit() or len(year) != 4:
+            year = str(datetime.now().year)
+        pattern = f"{prefix}-{year}-%"
+        with self.connect() as db:
+            values = [row["invoice_number"] for row in db.execute(
+                "SELECT invoice_number FROM invoices WHERE invoice_number LIKE ?", (pattern,))]
+        sequence = 1
+        for value in values:
+            try: sequence = max(sequence, int(value.rsplit("-", 1)[-1]) + 1)
+            except (TypeError, ValueError): pass
+        return f"{prefix}-{year}-{sequence:06d}"
 
     def backup(self):
         source = Path(self.path)
@@ -201,12 +238,17 @@ class Database:
                     "INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",
                     (code, name, account_type),
                 )
-            cur = db.execute("""INSERT INTO invoices(invoice_number,kind,invoice_date,party_id,currency,exchange_rate,subtotal,vat,total,status,currency_issue,supplier_account,vat_account,expense_account,source_file,source_row,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            due_date = str(item.get("due_date") or "").strip() or None
+            amount_paid = Decimal(str(item.get("amount_paid") or 0))
+            if amount_paid < 0 or amount_paid > total:
+                raise ValueError("Amount paid must be between zero and invoice total")
+            payment_status = "paid" if amount_paid == total and total > 0 else "partial" if amount_paid > 0 else "unpaid"
+            cur = db.execute("""INSERT INTO invoices(invoice_number,kind,invoice_date,party_id,currency,exchange_rate,subtotal,vat,total,status,currency_issue,supplier_account,vat_account,expense_account,source_file,source_row,due_date,payment_status,amount_paid,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 str(item["invoice_number"]), item["kind"], item.get("invoice_date"), party["id"], item.get("currency", "USD"),
                 str(item.get("exchange_rate", 1)), str(item.get("subtotal") or 0), str(item.get("vat") or 0), str(item.get("total") or 0),
                 status, currency_issue, supplier_account, vat_account, expense_account,
-                item.get("source_file"), item.get("source_row"), user_id, utcnow()))
+                item.get("source_file"), item.get("source_row"), due_date, payment_status, str(amount_paid), user_id, utcnow()))
             invoice_id = cur.lastrowid
             entry_number = f"INV-{invoice_id}"
             entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -260,6 +302,8 @@ class Database:
             subtotal_total += subtotal
             vat_total += vat
         invoice = dict(item)
+        if not str(invoice.get("invoice_number") or "").strip():
+            invoice["invoice_number"] = self.next_invoice_number(invoice.get("kind", "sale"), invoice.get("invoice_date"))
         invoice["subtotal"] = float(subtotal_total)
         invoice["vat"] = float(vat_total)
         invoice["total"] = float(subtotal_total + vat_total)
@@ -301,10 +345,17 @@ class Database:
         status = str(item.get("status") or "posted").strip().lower()
         if status not in ("posted", "review"):
             raise ValueError("Status must be posted or review")
+        due_date = str(item.get("due_date") or "").strip() or None
+        amount_paid = Decimal(str(item.get("amount_paid") or 0))
+        if amount_paid < 0 or amount_paid > total:
+            raise ValueError("Amount paid must be between zero and invoice total")
+        payment_status = "paid" if amount_paid == total and total > 0 else "partial" if amount_paid > 0 else "unpaid"
         with self.connect() as db:
             existing = db.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
             if not existing:
                 raise KeyError(invoice_id)
+            if existing["status"] == "cancelled":
+                raise ValueError("Cancelled invoices cannot be edited")
             party_kind = "customer" if kind == "sale" else "supplier"
             party_name = str(item["party_name"]).strip()
             db.execute("INSERT OR IGNORE INTO parties(kind,name,currency) VALUES(?,?,?)", (party_kind, party_name, currency))
@@ -316,9 +367,11 @@ class Database:
             ):
                 db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)", (code, name, account_type))
             db.execute("""UPDATE invoices SET invoice_number=?,kind=?,invoice_date=?,party_id=?,currency=?,
-                subtotal=?,vat=?,total=?,status=?,supplier_account=?,vat_account=?,expense_account=? WHERE id=?""",
+                subtotal=?,vat=?,total=?,status=?,supplier_account=?,vat_account=?,expense_account=?,
+                due_date=?,payment_status=?,amount_paid=? WHERE id=?""",
                 (str(item["invoice_number"]).strip(), kind, str(item["invoice_date"]).strip(), party["id"], currency,
-                 str(subtotal), str(vat), str(total), status, supplier_account, vat_account, expense_account, invoice_id))
+                 str(subtotal), str(vat), str(total), status, supplier_account, vat_account, expense_account,
+                 due_date, payment_status, str(amount_paid), invoice_id))
             entry = db.execute("SELECT id FROM journal_entries WHERE source_type='invoice' AND source_id=?", (invoice_id,)).fetchone()
             description = f"{kind.title()} invoice {str(item['invoice_number']).strip()}"
             if entry:
@@ -342,7 +395,9 @@ class Database:
                        (user_id, "update", "invoice", invoice_id, json.dumps({"fields": sorted(item.keys())}), utcnow()))
             row = db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,
                 i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.supplier_account,i.vat_account,
-                i.expense_account,i.source_row FROM invoices i LEFT JOIN parties p ON p.id=i.party_id WHERE i.id=?""",
+                i.expense_account,i.source_row,i.due_date,i.payment_status,i.amount_paid,
+                CAST(i.total AS REAL)-CAST(i.amount_paid AS REAL) outstanding
+                FROM invoices i LEFT JOIN parties p ON p.id=i.party_id WHERE i.id=?""",
                 (invoice_id,)).fetchone()
             return dict(row)
 
@@ -376,6 +431,7 @@ class Database:
             "total": str(Decimal(str(invoice["total"] or 0)) + total),
             "supplier_account": invoice["supplier_account"], "vat_account": invoice["vat_account"],
             "expense_account": invoice["expense_account"], "status": "posted",
+            "due_date": invoice.get("due_date"), "amount_paid": invoice.get("amount_paid", 0),
         }
         updated = self.update_invoice(invoice_id, updated_values, user_id)
         with self.connect() as db:
@@ -385,6 +441,156 @@ class Database:
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                        (user_id, "add_item", "invoice", invoice_id, json.dumps({"description": description}), utcnow()))
         return updated
+
+    def cancel_invoice(self, invoice_id, reason, user_id):
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("Cancellation reason is required")
+        with self.connect() as db:
+            invoice = db.execute("SELECT * FROM invoices WHERE id=?", (invoice_id,)).fetchone()
+            if not invoice:
+                raise KeyError(invoice_id)
+            if invoice["status"] == "cancelled":
+                raise ValueError("Invoice is already cancelled")
+            original = db.execute("SELECT * FROM journal_entries WHERE source_type='invoice' AND source_id=?", (invoice_id,)).fetchone()
+            if not original:
+                raise ValueError("Invoice journal entry was not found")
+            reverse = db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?)""", (f"REV-{invoice_id}", invoice["invoice_date"],
+                f"Cancellation of invoice {invoice['invoice_number']}", "invoice_reversal", invoice_id,
+                invoice["currency"], user_id, utcnow()))
+            lines = db.execute("SELECT account_id,party_id,debit,credit FROM journal_lines WHERE entry_id=?", (original["id"],)).fetchall()
+            for line in lines:
+                db.execute("INSERT INTO journal_lines(entry_id,account_id,party_id,debit,credit) VALUES(?,?,?,?,?)",
+                    (reverse.lastrowid, line["account_id"], line["party_id"], line["credit"], line["debit"]))
+            db.execute("UPDATE invoices SET status='cancelled',cancelled_at=?,cancellation_reason=? WHERE id=?",
+                       (utcnow(), reason, invoice_id))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                       (user_id,"cancel","invoice",invoice_id,json.dumps({"reason":reason}),utcnow()))
+        return self.get_invoice(invoice_id)
+
+    def duplicate_invoice(self, invoice_id, user_id):
+        with self.connect() as db:
+            row = db.execute("""SELECT i.*,p.name party_name FROM invoices i
+                LEFT JOIN parties p ON p.id=i.party_id WHERE i.id=?""", (invoice_id,)).fetchone()
+            if not row:
+                raise KeyError(invoice_id)
+            source = dict(row)
+            items = [dict(item) for item in db.execute("SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY id", (invoice_id,))]
+        new_number = self.next_invoice_number(source["kind"], source["invoice_date"])
+        payload = {key:source.get(key) for key in ("invoice_date","party_name","kind","currency","exchange_rate",
+            "subtotal","vat","total","supplier_account","vat_account","expense_account","due_date")}
+        payload.update({"invoice_number":new_number,"amount_paid":0,"source_file":"Duplicated invoice","source_row":None})
+        new_id = self.import_invoice(payload, user_id)
+        if items:
+            with self.connect() as db:
+                db.executemany("""INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,subtotal,vat_rate,vat,total)
+                    VALUES(?,?,?,?,?,?,?,?)""", [(new_id,item["description"],item["quantity"],item["unit_price"],
+                    item["subtotal"],item["vat_rate"],item["vat"],item["total"]) for item in items])
+                db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                    (user_id,"duplicate","invoice",new_id,json.dumps({"source_invoice_id":invoice_id}),utcnow()))
+        return self.get_invoice(new_id)
+
+    def get_invoice(self, invoice_id):
+        rows = self.list_invoices(limit=100000)
+        row = next((item for item in rows if item["id"] == invoice_id), None)
+        if not row:
+            raise KeyError(invoice_id)
+        return row
+
+    def add_attachment(self, invoice_id, file_name, mime_type, content, user_id):
+        if not file_name or not content:
+            raise ValueError("Attachment file is required")
+        if len(content) > 15 * 1024 * 1024:
+            raise ValueError("Attachment cannot exceed 15 MB")
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM invoices WHERE id=?", (invoice_id,)).fetchone():
+                raise KeyError(invoice_id)
+            result = db.execute("""INSERT INTO invoice_attachments(invoice_id,file_name,mime_type,content,uploaded_by,uploaded_at)
+                VALUES(?,?,?,?,?,?)""", (invoice_id,file_name,mime_type or "application/octet-stream",content,user_id,utcnow()))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"attach","invoice",invoice_id,json.dumps({"file_name":file_name}),utcnow()))
+            return result.lastrowid
+
+    def list_attachments(self, invoice_id):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT id,file_name,mime_type,length(content) size,uploaded_at
+                FROM invoice_attachments WHERE invoice_id=? ORDER BY id DESC""", (invoice_id,))]
+
+    def get_attachment(self, attachment_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM invoice_attachments WHERE id=?", (attachment_id,)).fetchone()
+            if not row: raise KeyError(attachment_id)
+            return dict(row)
+
+    def invoice_history(self, invoice_id):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT l.id,l.action,l.details,l.created_at,u.username
+                FROM audit_log l LEFT JOIN users u ON u.id=l.user_id
+                WHERE l.entity='invoice' AND l.entity_id=? ORDER BY l.id DESC""", (invoice_id,))]
+
+    def profit_and_loss(self, from_date=None, to_date=None, currency=None):
+        conditions = ["a.type IN ('income','expense')"]
+        parameters = []
+        normalized_date = """CASE WHEN e.entry_date GLOB '??-??-????'
+            THEN substr(e.entry_date,7,4)||'-'||substr(e.entry_date,4,2)||'-'||substr(e.entry_date,1,2)
+            ELSE e.entry_date END"""
+        if from_date: conditions.append(f"{normalized_date}>=?"); parameters.append(from_date)
+        if to_date: conditions.append(f"{normalized_date}<=?"); parameters.append(to_date)
+        if currency: conditions.append("e.currency=?"); parameters.append(currency)
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(f"""SELECT e.currency,a.code,a.name_en,a.type,
+                SUM(CAST(j.debit AS REAL)) debit,SUM(CAST(j.credit AS REAL)) credit
+                FROM journal_lines j JOIN journal_entries e ON e.id=j.entry_id JOIN accounts a ON a.id=j.account_id
+                WHERE {' AND '.join(conditions)} GROUP BY e.currency,a.id ORDER BY e.currency,a.code""", parameters)]
+        for row in rows:
+            row["amount"] = (row["credit"] - row["debit"]) if row["type"] == "income" else (row["debit"] - row["credit"])
+        return rows
+
+    def close_fiscal_year(self, year, user_id):
+        year = int(year)
+        start, end = f"{year}-01-01", f"{year}-12-31"
+        with self.connect() as db:
+            existing = db.execute("SELECT * FROM fiscal_years WHERE year=?", (year,)).fetchone()
+            if existing and existing["status"] == "closed":
+                raise ValueError(f"Fiscal year {year} is already closed")
+            pnl_rows = self.profit_and_loss(start, end)
+            by_currency = {}
+            for row in pnl_rows:
+                balance = Decimal(str(row["debit"] or 0)) - Decimal(str(row["credit"] or 0))
+                if balance:
+                    by_currency.setdefault(row["currency"], []).append((row["code"], balance))
+            results = {}
+            for currency, balances in by_currency.items():
+                entry = db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
+                    VALUES(?,?,?,?,?,?,?,?)""", (f"CLOSE-{year}-{currency}", end, f"Fiscal year {year} closing",
+                    "year_close", year, currency, user_id, utcnow()))
+                close_difference = Decimal("0")
+                for code, balance in balances:
+                    debit = -balance if balance < 0 else Decimal("0")
+                    credit = balance if balance > 0 else Decimal("0")
+                    close_difference += debit - credit
+                    db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",
+                        (entry.lastrowid,self._account_id(db,code),str(debit),str(credit)))
+                if close_difference > 0:
+                    result_code, debit, credit = "121", Decimal("0"), close_difference
+                else:
+                    result_code, debit, credit = "125", -close_difference, Decimal("0")
+                db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",
+                    (entry.lastrowid,self._account_id(db,result_code),str(debit),str(credit)))
+                results[currency] = float(credit - debit)
+            db.execute("""INSERT INTO fiscal_years(year,status,opened_at,closed_at,closed_by,details)
+                VALUES(?,'closed',?,?,?,?) ON CONFLICT(year) DO UPDATE SET status='closed',closed_at=excluded.closed_at,
+                closed_by=excluded.closed_by,details=excluded.details""",
+                (year,f"{year}-01-01T00:00:00",utcnow(),user_id,json.dumps({"net_results":results})))
+            db.execute("INSERT OR IGNORE INTO fiscal_years(year,status,opened_at) VALUES(?,'open',?)", (year+1,utcnow()))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"close","fiscal_year",year,json.dumps({"next_year":year+1,"net_results":results}),utcnow()))
+        return {"closed_year":year,"opened_year":year+1,"net_results":results}
+
+    def list_fiscal_years(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("SELECT * FROM fiscal_years ORDER BY year DESC")]
 
     def list_parties(self):
         with self.connect() as db:
@@ -437,7 +643,10 @@ class Database:
             return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,
                 CASE WHEN i.kind='sale' THEN CAST(i.total AS REAL) ELSE 0 END debit,
                 CASE WHEN i.kind='purchase' THEN CAST(i.total AS REAL) ELSE 0 END credit,
-                i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row
+                i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row,
+                i.due_date,i.payment_status,CAST(i.amount_paid AS REAL) amount_paid,
+                CAST(i.total AS REAL)-CAST(i.amount_paid AS REAL) outstanding,i.cancelled_at,i.cancellation_reason,
+                (SELECT COUNT(*) FROM invoice_attachments x WHERE x.invoice_id=i.id) attachment_count
                 FROM invoices i LEFT JOIN parties p ON p.id=i.party_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
 
     def list_accounts(self):
@@ -452,7 +661,7 @@ class Database:
                 SUM(CAST(vat AS REAL)) vat,SUM(CAST(total AS REAL)) total,COUNT(*) count,
                 SUM(CASE WHEN kind='sale' THEN CAST(total AS REAL) ELSE 0 END) debit,
                 SUM(CASE WHEN kind='purchase' THEN CAST(total AS REAL) ELSE 0 END) credit
-                FROM invoices GROUP BY kind,currency""").fetchall()
+                FROM invoices WHERE status!='cancelled' GROUP BY kind,currency""").fetchall()
             return [dict(r) for r in rows]
 
     def journal(self, from_date=None, to_date=None, currency=None, limit=5000):
