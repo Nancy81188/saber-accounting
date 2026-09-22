@@ -6,8 +6,17 @@ from database import Database
 from importer import read_invoices
 from lebanese_accounts import LEBANESE_ACCOUNTS
 from report_export import export_excel, export_pdf
+from desktop import row_matches_search
 
 class SaberAccountingTest(unittest.TestCase):
+    def test_table_search_matches_all_terms_across_columns(self):
+        row=("INV-100","22-09-2026","Supplier Alpha","purchase","USD",100,11,111)
+        self.assertTrue(row_matches_search(row,"supplier usd"))
+        self.assertTrue(row_matches_search(row,"INV-100 111"))
+        self.assertTrue(row_matches_search(row,""))
+        self.assertFalse(row_matches_search(row,"supplier eur"))
+        self.assertFalse(row_matches_search(row,"missing"))
+
     def test_import_rules_and_balancing(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "sample.xlsx"
