@@ -1,5 +1,5 @@
 #define MyAppName "Saber Accounting"
-#define MyAppVersion "0.7.3"
+#define MyAppVersion "0.8.0"
 #define MyAppPublisher "Saber for Audit"
 
 [Setup]
@@ -22,6 +22,7 @@ UninstallDisplayIcon={app}\SaberAccounting.exe
 [Files]
 Source: "dist\SaberAccounting.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\SaberAccountingServer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "assets\Saber_for_Audit_logo.png"; DestDir: "{app}\assets"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Saber Accounting"; Filename: "{app}\SaberAccounting.exe"

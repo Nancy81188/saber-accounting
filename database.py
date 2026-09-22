@@ -434,7 +434,10 @@ class Database:
 
     def list_invoices(self, limit=500):
         with self.connect() as db:
-            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row
+            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,
+                CASE WHEN i.kind='sale' THEN CAST(i.total AS REAL) ELSE 0 END debit,
+                CASE WHEN i.kind='purchase' THEN CAST(i.total AS REAL) ELSE 0 END credit,
+                i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row
                 FROM invoices i LEFT JOIN parties p ON p.id=i.party_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
 
     def list_accounts(self):
@@ -445,8 +448,47 @@ class Database:
 
     def dashboard(self):
         with self.connect() as db:
-            rows = db.execute("SELECT kind,currency,SUM(CAST(subtotal AS REAL)) subtotal,SUM(CAST(vat AS REAL)) vat,SUM(CAST(total AS REAL)) total,COUNT(*) count FROM invoices GROUP BY kind,currency").fetchall()
+            rows = db.execute("""SELECT kind,currency,SUM(CAST(subtotal AS REAL)) subtotal,
+                SUM(CAST(vat AS REAL)) vat,SUM(CAST(total AS REAL)) total,COUNT(*) count,
+                SUM(CASE WHEN kind='sale' THEN CAST(total AS REAL) ELSE 0 END) debit,
+                SUM(CASE WHEN kind='purchase' THEN CAST(total AS REAL) ELSE 0 END) credit
+                FROM invoices GROUP BY kind,currency""").fetchall()
             return [dict(r) for r in rows]
+
+    def journal(self, from_date=None, to_date=None, currency=None, limit=5000):
+        """Return journal lines with a running balance per account and currency."""
+        conditions = []
+        parameters = []
+        normalized_date = """CASE
+            WHEN e.entry_date GLOB '??-??-????'
+                THEN substr(e.entry_date,7,4)||'-'||substr(e.entry_date,4,2)||'-'||substr(e.entry_date,1,2)
+            ELSE e.entry_date END"""
+        if from_date:
+            conditions.append(f"{normalized_date} >= ?")
+            parameters.append(from_date)
+        if to_date:
+            conditions.append(f"{normalized_date} <= ?")
+            parameters.append(to_date)
+        if currency:
+            conditions.append("e.currency = ?")
+            parameters.append(currency)
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+        parameters.append(int(limit))
+        with self.connect() as db:
+            rows = [dict(row) for row in db.execute(f"""SELECT e.id entry_id,e.entry_number,e.entry_date,
+                e.description,e.source_type,e.source_id,e.currency,a.code account_code,a.name_en account_name,
+                COALESCE(p.name,'') party_name,CAST(j.debit AS REAL) debit,CAST(j.credit AS REAL) credit,j.id line_id
+                FROM journal_lines j JOIN journal_entries e ON e.id=j.entry_id
+                JOIN accounts a ON a.id=j.account_id LEFT JOIN parties p ON p.id=j.party_id
+                {where_clause}
+                ORDER BY {normalized_date},e.id,j.id LIMIT ?""", parameters)]
+        balances = {}
+        for row in rows:
+            key = (row["currency"], row["account_code"])
+            balances[key] = balances.get(key, Decimal("0")) + Decimal(str(row["debit"] or 0)) - Decimal(str(row["credit"] or 0))
+            row["balance"] = float(balances[key])
+            row.pop("line_id", None)
+        return rows
 
     def trial_balance(self, from_date=None, to_date=None):
         conditions = []

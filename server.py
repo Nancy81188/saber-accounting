@@ -67,6 +67,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             from_date = query.get("from_date", [None])[0]
             to_date = query.get("to_date", [None])[0]
             return self._json(200, {"items": self.db.trial_balance(from_date, to_date)})
+        if path == "/api/journal":
+            query = parse_qs(parsed.query)
+            return self._json(200, {"items": self.db.journal(
+                query.get("from_date", [None])[0],
+                query.get("to_date", [None])[0],
+                query.get("currency", [None])[0],
+            )})
         return self._json(404, {"error": "Not found"})
 
     def do_POST(self):

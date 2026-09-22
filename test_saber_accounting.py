@@ -95,6 +95,28 @@ class SaberAccountingTest(unittest.TestCase):
             trial_codes = {row["code"] for row in db.trial_balance()}
             self.assertTrue({"2110", "1310", "5110"}.issubset(trial_codes))
 
+    def test_debit_credit_visible_invoices_dashboard_and_journal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"journal.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            db.import_invoice({"invoice_number":"S-1","invoice_date":"20-09-2026","party_name":"Customer",
+                "kind":"sale","currency":"USD","subtotal":100,"vat":11,"total":111},user["id"])
+            db.import_invoice({"invoice_number":"P-1","invoice_date":"21-09-2026","party_name":"Supplier",
+                "kind":"purchase","currency":"USD","subtotal":200,"vat":22,"total":222},user["id"])
+            invoices={row["invoice_number"]:row for row in db.list_invoices()}
+            self.assertEqual(invoices["S-1"]["debit"],111.0)
+            self.assertEqual(invoices["S-1"]["credit"],0)
+            self.assertEqual(invoices["P-1"]["debit"],0)
+            self.assertEqual(invoices["P-1"]["credit"],222.0)
+            dashboard={row["kind"]:row for row in db.dashboard()}
+            self.assertEqual(dashboard["sale"]["debit"],111.0)
+            self.assertEqual(dashboard["purchase"]["credit"],222.0)
+            journal=db.journal("2026-09-20","2026-09-21","USD")
+            self.assertEqual(len(journal),6)
+            self.assertAlmostEqual(sum(row["debit"] for row in journal),333.0)
+            self.assertAlmostEqual(sum(row["credit"] for row in journal),333.0)
+            self.assertTrue(all("balance" in row for row in journal))
+
     def test_manual_invoice_items_editable_subtotal_and_vat(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"manual.db"); db.initialize("secret")
