@@ -323,6 +323,24 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertEqual(changed["entry_type"],"assets"); self.assertEqual(listed["debit"],75); self.assertEqual(listed["credit"],25)
             self.assertEqual(listed["supplier_side"],"D"); self.assertEqual(listed["vat_side"],"C"); self.assertEqual(listed["expense_side"],"C")
 
+    def test_deductible_split_and_automatic_unique_account_number(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"deductible.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            created=db.save_account({"code":"","name_en":"Auto expense","type":"expense","parent_code":"6011"},user["id"])
+            self.assertEqual(created["code"],"601100002")
+            with self.assertRaisesRegex(ValueError,"already exists"):
+                db.save_account({"code":"601100002","name_en":"Duplicate","type":"expense","parent_code":"6011"},user["id"])
+            invoice_id=db.create_manual_invoice({"invoice_number":"SPLIT-1","invoice_date":"22-09-2026","party_name":"Split Supplier","kind":"expenses","currency":"USD"},[
+                {"description":"Mixed expense","quantity":1,"unit_price":80,"deductible_subtotal":80,"non_deductible_subtotal":20,"vat_rate":11}
+            ],user["id"])
+            invoice=next(row for row in db.list_invoices() if row["id"]==invoice_id)
+            self.assertEqual(float(invoice["deductible_subtotal"]),80); self.assertEqual(float(invoice["non_deductible_subtotal"]),20)
+            self.assertEqual(float(invoice["vat"]),8.8); self.assertEqual(float(invoice["total"]),108.8)
+            journal=db.journal(currency="USD")
+            by_account={row["account_code"]:row for row in journal}
+            self.assertEqual(by_account["601100000"]["debit"],80); self.assertEqual(by_account["601100001"]["debit"],20)
+
     def test_update_specific_invoice_row(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"update.db"); db.initialize("secret")
