@@ -70,6 +70,18 @@ CREATE TABLE IF NOT EXISTS fiscal_years (
  id INTEGER PRIMARY KEY, year INTEGER NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'open',
  opened_at TEXT NOT NULL, closed_at TEXT, closed_by INTEGER REFERENCES users(id), details TEXT
 );
+CREATE TABLE IF NOT EXISTS payments (
+ id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('customer_receipt','supplier_payment')),
+ party_id INTEGER NOT NULL REFERENCES parties(id), payment_date TEXT NOT NULL, currency TEXT NOT NULL,
+ amount TEXT NOT NULL, cash_account TEXT NOT NULL, party_account TEXT NOT NULL,
+ reference TEXT, description TEXT, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS expenses (
+ id INTEGER PRIMARY KEY, expense_date TEXT NOT NULL, description TEXT NOT NULL, category TEXT,
+ currency TEXT NOT NULL, subtotal TEXT NOT NULL, vat TEXT NOT NULL, total TEXT NOT NULL,
+ expense_account TEXT NOT NULL, vat_account TEXT NOT NULL, payment_account TEXT NOT NULL,
+ reference TEXT, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
+);
 """
 
 LEGACY_ACCOUNT_MAP = {
@@ -178,6 +190,20 @@ class Database:
         row = db.execute("SELECT id FROM accounts WHERE code=?", (code,)).fetchone()
         return row["id"]
 
+    def _date_year(self, value):
+        text = str(value or "").strip()
+        for pattern in ("%d-%m-%Y", "%Y-%m-%d"):
+            try: return datetime.strptime(text, pattern).year
+            except ValueError: pass
+        raise ValueError("Date must use DD-MM-YYYY")
+
+    def _assert_period_open(self, value):
+        year = self._date_year(value)
+        with self.connect() as db:
+            row = db.execute("SELECT status FROM fiscal_years WHERE year=?", (year,)).fetchone()
+        if row and row["status"] == "closed":
+            raise ValueError(f"Fiscal year {year} is closed; entries cannot be added or changed")
+
     def next_invoice_number(self, kind="sale", invoice_date=None):
         prefix = "SAL" if kind == "sale" else "PUR"
         year = str(invoice_date or datetime.now().year)
@@ -218,6 +244,7 @@ class Database:
 
     def import_invoice(self, item, user_id):
         # No uniqueness constraint is applied to invoice numbers: duplicates are intentionally retained.
+        self._assert_period_open(item.get("invoice_date"))
         with self.connect() as db:
             party_kind = "customer" if item["kind"] == "sale" else "supplier"
             db.execute("INSERT OR IGNORE INTO parties(kind,name,currency) VALUES(?,?,?)", (party_kind, item.get("party_name") or "Unspecified", item.get("currency", "USD")))
@@ -323,6 +350,7 @@ class Database:
         missing = [field for field in required if not str(item.get(field) or "").strip()]
         if missing:
             raise ValueError("Missing fields: " + ", ".join(missing))
+        self._assert_period_open(item.get("invoice_date"))
         kind = str(item["kind"]).lower()
         currency = str(item["currency"]).upper()
         if kind not in ("sale", "purchase"):
@@ -452,6 +480,7 @@ class Database:
                 raise KeyError(invoice_id)
             if invoice["status"] == "cancelled":
                 raise ValueError("Invoice is already cancelled")
+            self._assert_period_open(invoice["invoice_date"])
             original = db.execute("SELECT * FROM journal_entries WHERE source_type='invoice' AND source_id=?", (invoice_id,)).fetchone()
             if not original:
                 raise ValueError("Invoice journal entry was not found")
@@ -595,7 +624,87 @@ class Database:
     def list_parties(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute(
-                "SELECT id,kind,name,currency FROM parties ORDER BY name,kind")]
+                "SELECT id,kind,name,tax_number,currency FROM parties ORDER BY name,kind")]
+
+    def save_party(self, item, user_id):
+        name=str(item.get("name") or "").strip(); kind=str(item.get("kind") or "").strip().lower()
+        currency=str(item.get("currency") or "USD").upper(); tax_number=str(item.get("tax_number") or "").strip() or None
+        if not name or kind not in ("customer","supplier","both") or currency not in ("USD","EUR","LBP","AED"):
+            raise ValueError("Enter a valid name, type, and currency")
+        with self.connect() as db:
+            db.execute("""INSERT INTO parties(kind,name,tax_number,currency) VALUES(?,?,?,?)
+                ON CONFLICT(kind,name) DO UPDATE SET tax_number=excluded.tax_number,currency=excluded.currency""",
+                (kind,name,tax_number,currency))
+            row=db.execute("SELECT * FROM parties WHERE kind=? AND name=?",(kind,name)).fetchone()
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"save","party",row["id"],json.dumps({"name":name,"kind":kind}),utcnow()))
+            return dict(row)
+
+    def add_payment(self, item, user_id):
+        kind=str(item.get("kind") or "").strip(); date=str(item.get("payment_date") or "").strip()
+        self._assert_period_open(date)
+        if kind not in ("customer_receipt","supplier_payment"): raise ValueError("Invalid payment type")
+        try: amount=Decimal(str(item.get("amount") or 0))
+        except Exception as exc: raise ValueError("Invalid payment amount") from exc
+        if amount<=0: raise ValueError("Payment amount must be above zero")
+        currency=str(item.get("currency") or "USD").upper()
+        cash_account=str(item.get("cash_account") or "531").strip()
+        party_account=str(item.get("party_account") or (DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"] if kind=="customer_receipt" else DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"])).strip()
+        party_id=int(item.get("party_id"))
+        with self.connect() as db:
+            party=db.execute("SELECT * FROM parties WHERE id=?",(party_id,)).fetchone()
+            if not party: raise KeyError(party_id)
+            db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(cash_account,"Cash / Bank Account","asset"))
+            db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(party_account,"Party Control Account","asset" if kind=="customer_receipt" else "liability"))
+            result=db.execute("""INSERT INTO payments(kind,party_id,payment_date,currency,amount,cash_account,party_account,reference,description,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(kind,party_id,date,currency,str(amount),cash_account,party_account,
+                str(item.get("reference") or "").strip(),str(item.get("description") or "").strip(),user_id,utcnow()))
+            payment_id=result.lastrowid
+            entry=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?)""",(f"PAY-{payment_id}",date,str(item.get("description") or kind.replace("_"," ")).strip(),"payment",payment_id,currency,user_id,utcnow()))
+            if kind=="customer_receipt": lines=[(cash_account,amount,0),(party_account,0,amount)]
+            else: lines=[(party_account,amount,0),(cash_account,0,amount)]
+            for code,debit,credit in lines:
+                db.execute("INSERT INTO journal_lines(entry_id,account_id,party_id,debit,credit) VALUES(?,?,?,?,?)",
+                    (entry.lastrowid,self._account_id(db,code),party_id,str(debit),str(credit)))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"create","payment",payment_id,json.dumps({"kind":kind,"amount":str(amount),"currency":currency}),utcnow()))
+            return payment_id
+
+    def list_payments(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT x.id,x.kind,x.payment_date,p.name party_name,x.currency,
+                CAST(x.amount AS REAL) amount,x.cash_account,x.party_account,x.reference,x.description
+                FROM payments x JOIN parties p ON p.id=x.party_id ORDER BY x.id DESC""")]
+
+    def add_expense(self, item, user_id):
+        date=str(item.get("expense_date") or "").strip(); self._assert_period_open(date)
+        description=str(item.get("description") or "").strip()
+        if not description: raise ValueError("Expense description is required")
+        subtotal=Decimal(str(item.get("subtotal") or 0)); vat=Decimal(str(item.get("vat") or 0)); total=subtotal+vat
+        if subtotal<0 or vat<0 or total<=0: raise ValueError("Expense amounts must be valid")
+        currency=str(item.get("currency") or "USD").upper(); expense_account=str(item.get("expense_account") or "6011").strip()
+        vat_account=str(item.get("vat_account") or DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"]).strip(); payment_account=str(item.get("payment_account") or "531").strip()
+        with self.connect() as db:
+            for code,name,typ in ((expense_account,"Expense Account","expense"),(vat_account,"VAT Receivable","asset"),(payment_account,"Cash / Bank Account","asset")):
+                db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(code,name,typ))
+            result=db.execute("""INSERT INTO expenses(expense_date,description,category,currency,subtotal,vat,total,expense_account,vat_account,payment_account,reference,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(date,description,str(item.get("category") or "").strip(),currency,str(subtotal),str(vat),str(total),expense_account,vat_account,payment_account,str(item.get("reference") or "").strip(),user_id,utcnow()))
+            expense_id=result.lastrowid
+            entry=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?)""",(f"EXP-{expense_id}",date,description,"expense",expense_id,currency,user_id,utcnow()))
+            for code,debit,credit in ((expense_account,subtotal,0),(vat_account,vat,0),(payment_account,0,total)):
+                if Decimal(str(debit or credit)):
+                    db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",(entry.lastrowid,self._account_id(db,code),str(debit),str(credit)))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"create","expense",expense_id,json.dumps({"total":str(total),"currency":currency}),utcnow()))
+            return expense_id
+
+    def list_expenses(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT id,expense_date,description,category,currency,
+                CAST(subtotal AS REAL) subtotal,CAST(vat AS REAL) vat,CAST(total AS REAL) total,
+                expense_account,vat_account,payment_account,reference FROM expenses ORDER BY id DESC""")]
 
     def statement_of_account(self, party_id, from_date=None, to_date=None, currency=None):
         normalized_date = """CASE
@@ -720,3 +829,79 @@ class Database:
                 {where_clause}
                 GROUP BY a.id,e.currency ORDER BY e.currency,a.code""", parameters).fetchall()
             return [dict(r) for r in rows]
+
+    def general_ledger(self, account_code=None, from_date=None, to_date=None, currency=None):
+        rows=self.journal(None,to_date,currency,limit=20000)
+        if account_code: rows=[row for row in rows if row["account_code"]==str(account_code)]
+        opening={}; items=[]; balances={}
+        for row in rows:
+            normalized=str(row["entry_date"] or "")
+            try: normalized=datetime.strptime(normalized,"%d-%m-%Y").strftime("%Y-%m-%d")
+            except ValueError: pass
+            key=(row["currency"],row["account_code"])
+            movement=Decimal(str(row["debit"] or 0))-Decimal(str(row["credit"] or 0))
+            if from_date and normalized<from_date:
+                opening[key]=opening.get(key,Decimal("0"))+movement; continue
+            balances[key]=balances.get(key,opening.get(key,Decimal("0")))+movement
+            row["balance"]=float(balances[key]); items.append(row)
+        return {"opening":[{"currency":k[0],"account_code":k[1],"amount":float(v)} for k,v in opening.items()],"items":items}
+
+    def balance_sheet(self, to_date=None, currency=None):
+        conditions=["a.type IN ('asset','liability','equity')"]
+        parameters=[]
+        normalized_date="""CASE WHEN e.entry_date GLOB '??-??-????'
+            THEN substr(e.entry_date,7,4)||'-'||substr(e.entry_date,4,2)||'-'||substr(e.entry_date,1,2)
+            ELSE e.entry_date END"""
+        if to_date: conditions.append(f"{normalized_date}<=?"); parameters.append(to_date)
+        if currency: conditions.append("e.currency=?"); parameters.append(currency)
+        with self.connect() as db:
+            rows=[dict(row) for row in db.execute(f"""SELECT e.currency,a.code,a.name_en,a.type,
+                SUM(CAST(j.debit AS REAL)) debit,SUM(CAST(j.credit AS REAL)) credit,
+                SUM(CAST(j.debit AS REAL)-CAST(j.credit AS REAL)) balance
+                FROM journal_lines j JOIN journal_entries e ON e.id=j.entry_id JOIN accounts a ON a.id=j.account_id
+                WHERE {' AND '.join(conditions)} GROUP BY e.currency,a.id ORDER BY e.currency,a.type,a.code""",parameters)]
+        pnl=self.profit_and_loss(None,to_date,currency)
+        current_results={}
+        for row in pnl:
+            current_results.setdefault(row["currency"],Decimal("0"))
+            amount=Decimal(str(row["amount"] or 0))
+            current_results[row["currency"]]+=amount if row["type"]=="income" else -amount
+        for code,result in current_results.items():
+            if result:
+                rows.append({"currency":code,"code":"13","name_en":"Current Year Net Result","type":"equity",
+                    "debit":float(-result) if result<0 else 0.0,"credit":float(result) if result>0 else 0.0,"balance":float(-result)})
+        return rows
+
+    def vat_report(self, from_date=None, to_date=None, currency=None):
+        normalized="""CASE WHEN invoice_date GLOB '??-??-????'
+            THEN substr(invoice_date,7,4)||'-'||substr(invoice_date,4,2)||'-'||substr(invoice_date,1,2)
+            ELSE invoice_date END"""
+        conditions=["status!='cancelled'"]; parameters=[]
+        if from_date: conditions.append(f"{normalized}>=?"); parameters.append(from_date)
+        if to_date: conditions.append(f"{normalized}<=?"); parameters.append(to_date)
+        if currency: conditions.append("currency=?"); parameters.append(currency)
+        with self.connect() as db:
+            invoice_rows=[dict(row) for row in db.execute(f"""SELECT currency,kind,COUNT(*) invoices,
+                SUM(CAST(subtotal AS REAL)) subtotal,SUM(CAST(vat AS REAL)) vat,SUM(CAST(total AS REAL)) total
+                FROM invoices WHERE {' AND '.join(conditions)} GROUP BY currency,kind ORDER BY currency,kind""",parameters)]
+            expense_conditions=[]; expense_parameters=[]
+            expense_date="""CASE WHEN expense_date GLOB '??-??-????'
+                THEN substr(expense_date,7,4)||'-'||substr(expense_date,4,2)||'-'||substr(expense_date,1,2)
+                ELSE expense_date END"""
+            if from_date: expense_conditions.append(f"{expense_date}>=?"); expense_parameters.append(from_date)
+            if to_date: expense_conditions.append(f"{expense_date}<=?"); expense_parameters.append(to_date)
+            if currency: expense_conditions.append("currency=?"); expense_parameters.append(currency)
+            where=" WHERE "+" AND ".join(expense_conditions) if expense_conditions else ""
+            expenses=[dict(row) for row in db.execute(f"""SELECT currency,COUNT(*) invoices,SUM(CAST(subtotal AS REAL)) subtotal,
+                SUM(CAST(vat AS REAL)) vat,SUM(CAST(total AS REAL)) total FROM expenses{where} GROUP BY currency""",expense_parameters)]
+        for row in expenses: invoice_rows.append({**row,"kind":"expense"})
+        totals={}
+        for row in invoice_rows:
+            totals.setdefault(row["currency"],{"sales_vat":0.0,"purchase_vat":0.0,"expense_vat":0.0})
+            key="sales_vat" if row["kind"]=="sale" else "purchase_vat" if row["kind"]=="purchase" else "expense_vat"
+            totals[row["currency"]][key]+=float(row["vat"] or 0)
+        summary=[]
+        for code,value in totals.items():
+            recoverable=value["purchase_vat"]+value["expense_vat"]
+            summary.append({"currency":code,**value,"recoverable_vat":recoverable,"vat_payable":value["sales_vat"]-recoverable})
+        return {"items":invoice_rows,"summary":summary}

@@ -72,3 +72,17 @@ class ApiClient:
         return self.request("GET","/api/profit-loss"+(f"?{query}" if query else ""))["items"]
     def fiscal_years(self): return self.request("GET","/api/fiscal-years")["items"]
     def close_fiscal_year(self, year): return self.request("POST","/api/fiscal-years/close",{"year":year})
+    def save_party(self, item): return self.request("POST","/api/parties",item)["party"]
+    def payments(self): return self.request("GET","/api/payments")["items"]
+    def add_payment(self, item): return self.request("POST","/api/payments",item)
+    def expenses(self): return self.request("GET","/api/expenses")["items"]
+    def add_expense(self, item): return self.request("POST","/api/expenses",item)
+    def general_ledger(self, account=None, from_date=None, to_date=None, currency=None):
+        query=urlencode({k:v for k,v in {"account":account,"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v})
+        return self.request("GET","/api/general-ledger"+(f"?{query}" if query else ""))
+    def balance_sheet(self, to_date=None, currency=None):
+        query=urlencode({k:v for k,v in {"to_date":to_date,"currency":currency}.items() if v})
+        return self.request("GET","/api/balance-sheet"+(f"?{query}" if query else ""))["items"]
+    def vat_report(self, from_date=None, to_date=None, currency=None):
+        query=urlencode({k:v for k,v in {"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v})
+        return self.request("GET","/api/vat-report"+(f"?{query}" if query else ""))

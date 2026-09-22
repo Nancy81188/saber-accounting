@@ -158,6 +158,28 @@ class SaberAccountingTest(unittest.TestCase):
             years={row["year"]:row["status"] for row in db.list_fiscal_years()}
             self.assertEqual(years[2026],"closed"); self.assertEqual(years[2027],"open")
 
+    def test_payments_expenses_reports_and_period_lock(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"professional.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            customer=db.save_party({"name":"Customer A","kind":"customer","tax_number":"C-1","currency":"USD"},user["id"])
+            supplier=db.save_party({"name":"Supplier A","kind":"supplier","tax_number":"S-1","currency":"USD"},user["id"])
+            db.import_invoice({"invoice_number":"S-1","invoice_date":"01-06-2026","party_name":"Customer A","kind":"sale","currency":"USD","subtotal":1000,"vat":110,"total":1110},user["id"])
+            db.import_invoice({"invoice_number":"P-1","invoice_date":"02-06-2026","party_name":"Supplier A","kind":"purchase","currency":"USD","subtotal":400,"vat":44,"total":444},user["id"])
+            db.add_payment({"kind":"customer_receipt","party_id":customer["id"],"payment_date":"03-06-2026","currency":"USD","amount":500,"cash_account":"531","party_account":"4111"},user["id"])
+            db.add_payment({"kind":"supplier_payment","party_id":supplier["id"],"payment_date":"04-06-2026","currency":"USD","amount":200,"cash_account":"5121","party_account":"4011"},user["id"])
+            db.add_expense({"expense_date":"05-06-2026","description":"Office expense","category":"Office","currency":"USD","subtotal":100,"vat":11,"expense_account":"6011","vat_account":"4426.6","payment_account":"531"},user["id"])
+            self.assertEqual(len(db.list_payments()),2); self.assertEqual(len(db.list_expenses()),1)
+            ledger=db.general_ledger("531","2026-01-01","2026-12-31","USD")
+            self.assertTrue(ledger["items"])
+            balance=db.balance_sheet("2026-12-31","USD")
+            self.assertTrue(any(row["code"]=="13" for row in balance))
+            vat=db.vat_report("2026-01-01","2026-12-31","USD")["summary"][0]
+            self.assertEqual(vat["sales_vat"],110.0); self.assertEqual(vat["recoverable_vat"],55.0); self.assertEqual(vat["vat_payable"],55.0)
+            db.close_fiscal_year(2026,user["id"])
+            with self.assertRaisesRegex(ValueError,"closed"):
+                db.add_expense({"expense_date":"31-12-2026","description":"Late","currency":"USD","subtotal":1,"vat":0},user["id"])
+
     def test_manual_invoice_items_editable_subtotal_and_vat(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"manual.db"); db.initialize("secret")

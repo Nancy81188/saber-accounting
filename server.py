@@ -60,6 +60,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(200, {"items": self.db.list_accounts()})
         if path == "/api/parties":
             return self._json(200, {"items": self.db.list_parties()})
+        if path == "/api/payments": return self._json(200,{"items":self.db.list_payments()})
+        if path == "/api/expenses": return self._json(200,{"items":self.db.list_expenses()})
         if path == "/api/statement":
             query = parse_qs(parsed.query)
             try:
@@ -94,6 +96,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(200,{"items":self.db.profit_and_loss(query.get("from_date",[None])[0],query.get("to_date",[None])[0],query.get("currency",[None])[0])})
         if path == "/api/fiscal-years":
             return self._json(200,{"items":self.db.list_fiscal_years()})
+        if path == "/api/general-ledger":
+            query=parse_qs(parsed.query)
+            return self._json(200,self.db.general_ledger(query.get("account",[None])[0],query.get("from_date",[None])[0],query.get("to_date",[None])[0],query.get("currency",[None])[0]))
+        if path == "/api/balance-sheet":
+            query=parse_qs(parsed.query)
+            return self._json(200,{"items":self.db.balance_sheet(query.get("to_date",[None])[0],query.get("currency",[None])[0])})
+        if path == "/api/vat-report":
+            query=parse_qs(parsed.query)
+            return self._json(200,self.db.vat_report(query.get("from_date",[None])[0],query.get("to_date",[None])[0],query.get("currency",[None])[0]))
         return self._json(404, {"error": "Not found"})
 
     def do_POST(self):
@@ -108,6 +119,20 @@ class ApiHandler(BaseHTTPRequestHandler):
         user = self._user()
         if not user:
             return self._json(401, {"error": "Unauthorized"})
+        if user["role"] == "viewer":
+            return self._json(403,{"error":"Viewer access is read-only"})
+        if path == "/api/parties":
+            try: result=self.db.save_party(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"party":result})
+        if path == "/api/payments":
+            try: payment_id=self.db.add_payment(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"payment_id":payment_id})
+        if path == "/api/expenses":
+            try: expense_id=self.db.add_expense(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"expense_id":expense_id})
         if path.startswith("/api/invoices/") and path.endswith("/items"):
             try:
                 invoice_id = int(path.split("/")[-2])
@@ -171,6 +196,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         user = self._user()
         if not user:
             return self._json(401, {"error": "Unauthorized"})
+        if user["role"] == "viewer":
+            return self._json(403,{"error":"Viewer access is read-only"})
         if path.startswith("/api/invoices/"):
             try:
                 invoice_id = int(path.rsplit("/", 1)[-1])
