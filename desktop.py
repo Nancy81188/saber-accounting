@@ -11,6 +11,14 @@ from report_export import export_excel, export_pdf, print_rows
 
 NAVY, GOLD, LIGHT = "#071b2e", "#c9a96a", "#f3f6f8"
 
+def row_matches_search(values, query):
+    """Return True when every search term appears somewhere in the row."""
+    terms = str(query or "").casefold().split()
+    if not terms:
+        return True
+    searchable = " ".join("" if value is None else str(value) for value in values).casefold()
+    return all(term in searchable for term in terms)
+
 class SaberApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -86,11 +94,56 @@ class SaberApp(tk.Tk):
         self.load_dashboard(); self.load_invoices(); self.load_trial()
 
     def table(self,parent,columns):
+        search_bar=tk.Frame(parent,bg=LIGHT); search_bar.pack(fill="x",padx=10,pady=(10,0))
+        search_var=tk.StringVar()
+        tk.Label(search_bar,text="Search:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
+        search_entry=tk.Entry(search_bar,textvariable=search_var,width=36)
+        search_entry.pack(side="left",padx=8)
+        tk.Button(search_bar,text="Clear",command=lambda:search_var.set(""),bg=NAVY,fg="white",
+                  border=0,padx=12,pady=3).pack(side="left")
+
         frame=tk.Frame(parent,bg=LIGHT); frame.pack(fill="both",expand=True,padx=10,pady=10)
         tree=ttk.Treeview(frame,columns=[c[0] for c in columns],show="headings")
         for key,label,width in columns: tree.heading(key,text=label); tree.column(key,width=width,anchor="w")
         scroll=ttk.Scrollbar(frame,orient="vertical",command=tree.yview); tree.configure(yscrollcommand=scroll.set)
         tree.pack(side="left",fill="both",expand=True); scroll.pack(side="right",fill="y")
+
+        real_insert,real_delete=tree.insert,tree.delete
+        tree._search_rows=[]
+        tree._search_counter=0
+        def tracked_insert(parent_id,index,*args,**kwargs):
+            tree._search_counter+=1
+            saved_kwargs=dict(kwargs)
+            saved_kwargs.setdefault("iid",f"search-{id(tree)}-{tree._search_counter}")
+            record=(parent_id,index,args,saved_kwargs)
+            tree._search_rows.append(record)
+            if row_matches_search(saved_kwargs.get("values",()),search_var.get()):
+                real_insert(parent_id,index,*args,**saved_kwargs)
+            return saved_kwargs["iid"]
+        def tracked_delete(*item_ids):
+            visible=set(tree.get_children(""))
+            requested=set(item_ids)
+            if requested==visible:
+                tree._search_rows.clear()
+            else:
+                tree._search_rows=[
+                    record for record in tree._search_rows
+                    if str(record[3].get("iid")) not in requested
+                ]
+            if item_ids:
+                real_delete(*item_ids)
+        def apply_search(*_args):
+            visible=tree.get_children("")
+            if visible:
+                real_delete(*visible)
+            for parent_id,index,args,saved_kwargs in tree._search_rows:
+                if row_matches_search(saved_kwargs.get("values",()),search_var.get()):
+                    real_insert(parent_id,index,*args,**saved_kwargs)
+        tree.insert=tracked_insert
+        tree.delete=tracked_delete
+        tree.search_var=search_var
+        search_var.trace_add("write",apply_search)
+        search_entry.bind("<Escape>",lambda _event:search_var.set(""))
         return tree
 
     def build_dashboard(self):
