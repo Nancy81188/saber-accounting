@@ -7,6 +7,7 @@ from importer import read_invoices
 from lebanese_accounts import LEBANESE_ACCOUNTS
 from report_export import export_excel, export_invoice_pdf, export_pdf
 from desktop import row_matches_search
+from company_manager import CompanyManager
 
 class SaberAccountingTest(unittest.TestCase):
     def test_table_search_matches_all_terms_across_columns(self):
@@ -412,6 +413,22 @@ class SaberAccountingTest(unittest.TestCase):
             db.import_invoice(first,user["id"]); result=db.clear_invoices(user["id"]); db.import_invoice(second,user["id"])
             self.assertEqual(result["deleted"],1); self.assertTrue(Path(result["backup"]).exists())
             invoices=db.list_invoices(); self.assertEqual(len(invoices),1); self.assertEqual(invoices[0]["invoice_number"],"2")
+
+    def test_multi_company_and_separate_fiscal_year_databases(self):
+        with tempfile.TemporaryDirectory() as folder:
+            master=Database(Path(folder)/"master.db"); master.initialize("secret")
+            user=master.user_for_token(master.login("admin","secret")["token"])
+            manager=CompanyManager(Path(folder)/"master.db")
+            company=manager.create_company({"name":"Second Company","year":2026,"mof_number":"MOF-2"},master)
+            db_2026=manager.database(company["id"],2026)
+            db_2026.save_party({"name":"Only In Company Two","kind":"supplier","currency":"USD"},user["id"])
+            self.assertFalse(any(p["name"]=="Only In Company Two" for p in master.list_parties()))
+            manager.create_year(company["id"],2027,user["id"])
+            db_2027=manager.database(company["id"],2027)
+            self.assertNotEqual(Path(db_2026.path).resolve(),Path(db_2027.path).resolve())
+            self.assertTrue(any(p["name"]=="Only In Company Two" for p in db_2027.list_parties()))
+            updated=manager.update_company(company["id"],{"name":"Renamed Company","active":False})
+            self.assertEqual(updated["name"],"Renamed Company"); self.assertFalse(updated["active"])
 
     def test_opening_display_currency_dc_choices_and_linked_rate(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -10,12 +10,16 @@ class ApiClient:
     def __init__(self, base_url="http://127.0.0.1:8765"):
         self.base_url = base_url.rstrip("/")
         self.token = None
+        self.company_id = None
+        self.fiscal_year = None
 
     def request(self, method, path, body=None):
         data = json.dumps(body).encode("utf-8") if body is not None else None
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        if self.company_id: headers["X-Company-ID"]=str(self.company_id)
+        if self.fiscal_year: headers["X-Fiscal-Year"]=str(self.fiscal_year)
         request = Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
             with urlopen(request, timeout=60) as response:
@@ -33,6 +37,11 @@ class ApiClient:
         return result
 
     def dashboard(self): return self.request("GET", "/api/dashboard")["items"]
+    def companies(self): return self.request("GET","/api/companies")["items"]
+    def create_company(self,item): return self.request("POST","/api/companies",item)["company"]
+    def update_company(self,company_id,item): return self.request("PUT",f"/api/companies/{company_id}",item)["company"]
+    def create_fiscal_year(self,company_id,year): return self.request("POST","/api/companies/year",{"company_id":company_id,"year":year})["company"]
+    def select_company_year(self,company_id,year): self.company_id=company_id; self.fiscal_year=int(year)
     def professional_dashboard(self): return self.request("GET","/api/dashboard/professional")
     def invoices(self): return self.request("GET", "/api/invoices")["items"]
     def accounts(self): return self.request("GET", "/api/accounts")["items"]

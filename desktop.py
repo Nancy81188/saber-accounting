@@ -101,8 +101,60 @@ class SaberApp(tk.Tk):
             self.client = ApiClient(self.server.get())
             self.current_user=self.client.login(self.username.get(), self.password.get())
             self.last_activity=time.monotonic(); self.bind_all("<Any-KeyPress>",self.record_activity); self.bind_all("<Any-Button>",self.record_activity); self.after(60000,self.check_auto_logout)
-            self.main_screen()
+            self.company_selection_screen()
         except Exception as exc: messagebox.showerror("Saber Accounting", str(exc))
+
+    def company_selection_screen(self):
+        try: companies=self.client.companies()
+        except Exception as exc: return messagebox.showerror("Companies",str(exc))
+        self.available_companies=companies; self.clear()
+        card=tk.Frame(self,bg="white",padx=42,pady=34); card.place(relx=.5,rely=.5,anchor="center")
+        tk.Label(card,text="Select Company & Fiscal Year",bg="white",fg=NAVY,font=("Segoe UI",18,"bold")).grid(row=0,column=0,columnspan=2,pady=(0,20))
+        labels={f'{c["name"]} ({"Active" if c.get("active",True) else "Inactive"})':c for c in companies}; company_var=tk.StringVar(value=next(iter(labels),"")); year_var=tk.StringVar()
+        tk.Label(card,text="Company",bg="white").grid(row=1,column=0,sticky="w",pady=8); company_box=ttk.Combobox(card,textvariable=company_var,values=list(labels),state="readonly",width=34); company_box.grid(row=1,column=1,pady=8)
+        tk.Label(card,text="Fiscal Year",bg="white").grid(row=2,column=0,sticky="w",pady=8); year_box=ttk.Combobox(card,textvariable=year_var,state="readonly",width=34); year_box.grid(row=2,column=1,pady=8)
+        def refresh_years(*_args):
+            company=labels.get(company_var.get()); years=[str(y["year"]) for y in company.get("years",[])] if company else []
+            year_box["values"]=years; year_var.set(years[-1] if years else "")
+        company_box.bind("<<ComboboxSelected>>",refresh_years); refresh_years()
+        def open_company():
+            company=labels.get(company_var.get())
+            if not company or not year_var.get(): return messagebox.showwarning("Companies","Select a company and fiscal year")
+            if not company.get("active",True): return messagebox.showwarning("Companies","This company is inactive")
+            self.client.select_company_year(company["id"],year_var.get()); self.current_company=company; self.current_fiscal_year=int(year_var.get()); self.main_screen()
+        tk.Button(card,text="Open Company",command=open_company,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=25,pady=8).grid(row=3,column=0,columnspan=2,pady=(18,6))
+        if self.current_user.get("role")=="admin":
+            self.action_button(card,"Create Company",self.create_company_dialog).grid(row=4,column=0,padx=4,pady=5)
+            self.action_button(card,"Manage Selected",lambda:self.manage_company_dialog(labels.get(company_var.get()))).grid(row=4,column=1,padx=4,pady=5)
+
+    def create_company_dialog(self):
+        window=tk.Toplevel(self); window.title("Create Company"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
+        fields={key:tk.StringVar(value=str(datetime.now().year) if key=="year" else "") for key in ("name","year","address","phone","mof_number","email","website")}
+        for row,(key,label) in enumerate((("name","Company Name"),("year","Opening Fiscal Year"),("address","Address"),("phone","Phone"),("mof_number","MOF / VAT Number"),("email","Email"),("website","Website"))):
+            tk.Label(window,text=label,bg=LIGHT).grid(row=row,column=0,sticky="w",padx=14,pady=7); tk.Entry(window,textvariable=fields[key],width=38).grid(row=row,column=1,padx=14,pady=7)
+        def save():
+            try: self.client.create_company({key:var.get().strip() for key,var in fields.items()})
+            except Exception as exc: return messagebox.showerror("Create Company",str(exc),parent=window)
+            window.destroy(); self.company_selection_screen()
+        self.action_button(window,"Create Company",save).grid(row=7,column=0,columnspan=2,pady=14)
+
+    def manage_company_dialog(self,company):
+        if not company: return
+        window=tk.Toplevel(self); window.title("Manage Company"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
+        name=tk.StringVar(value=company["name"]); new_year=tk.StringVar(value=str(max(int(y["year"]) for y in company.get("years",[]))+1)); active=tk.BooleanVar(value=company.get("active",True))
+        tk.Label(window,text="Company Name",bg=LIGHT).grid(row=0,column=0,padx=14,pady=8); tk.Entry(window,textvariable=name,width=32).grid(row=0,column=1,padx=14,pady=8)
+        tk.Checkbutton(window,text="Active",variable=active,bg=LIGHT).grid(row=1,column=0,columnspan=2,pady=5)
+        tk.Label(window,text="New Fiscal Year",bg=LIGHT).grid(row=2,column=0,padx=14,pady=8); tk.Entry(window,textvariable=new_year,width=12).grid(row=2,column=1,padx=14,pady=8,sticky="w")
+        def update():
+            try: self.client.update_company(company["id"],{"name":name.get(),"active":active.get()})
+            except Exception as exc: return messagebox.showerror("Company",str(exc),parent=window)
+            window.destroy(); self.company_selection_screen()
+        def create_year():
+            if not messagebox.askyesno("Fiscal Year","Close the latest year and create the new year with opening balances?",parent=window): return
+            try: self.client.create_fiscal_year(company["id"],int(new_year.get()))
+            except Exception as exc: return messagebox.showerror("Fiscal Year",str(exc),parent=window)
+            window.destroy(); self.company_selection_screen()
+        self.action_button(window,"Save Company",update).grid(row=3,column=0,padx=6,pady=14); self.action_button(window,"Close & Create Year",create_year).grid(row=3,column=1,padx=6,pady=14)
 
     def main_screen(self):
         self.clear(); lang=self.language.get()
@@ -114,6 +166,8 @@ class SaberApp(tk.Tk):
             pass
         tk.Label(top,text=tr(lang,"title"),bg=NAVY,fg="white",font=("Segoe UI",20,"bold")).pack(side="left",padx=8,pady=19)
         tk.Label(top,text="11% VAT  |  USD · LBP · EUR · AED",bg=NAVY,fg=GOLD,font=("Segoe UI",10,"bold")).pack(side="right",padx=28)
+        tk.Button(top,text="Switch Company / Year",command=self.company_selection_screen,bg=GOLD,fg=NAVY,border=0,padx=10,pady=5).pack(side="right",padx=5)
+        tk.Label(top,text=f'{getattr(self,"current_company",{}).get("name","")} · {getattr(self,"current_fiscal_year","")}',bg=NAVY,fg="white",font=("Segoe UI",9,"bold")).pack(side="right",padx=8)
         tab_nav=tk.Frame(self,bg=LIGHT); tab_nav.pack(fill="x",padx=18,pady=(8,0))
         ttk.Style(self).layout("Tabless.TNotebook.Tab",[])
         notebook=ttk.Notebook(self,style="Tabless.TNotebook"); self.main_notebook=notebook; notebook.pack(fill="both",expand=True,padx=18,pady=(6,16))

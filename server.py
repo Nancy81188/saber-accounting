@@ -10,9 +10,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from database import Database
+from company_manager import CompanyManager
 
 class ApiHandler(BaseHTTPRequestHandler):
     db: Database = None
+    master_db: Database = None
+    company_manager: CompanyManager = None
 
     def log_message(self, fmt, *args):
         print(f"[Saber API] {self.address_string()} {fmt % args}")
@@ -32,11 +35,15 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _user(self):
         auth = self.headers.get("Authorization", "")
         token = auth[7:] if auth.startswith("Bearer ") else ""
-        user=self.db.user_for_token(token)
+        user=self.master_db.user_for_token(token)
         if user:
             try: self.db.maybe_scheduled_backup()
             except Exception: pass
         return user
+
+    def _select_database(self):
+        try: self.db=self.company_manager.database(self.headers.get("X-Company-ID"),self.headers.get("X-Fiscal-Year"))
+        except Exception: self.db=self.master_db
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -46,6 +53,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         user = self._user()
         if not user:
             return self._json(401, {"error": "Unauthorized"})
+        if path == "/api/companies": return self._json(200,{"items":self.company_manager.list_companies(user["role"]=="admin")})
+        self._select_database()
         if path == "/api/invoices":
             return self._json(200, {"items": self.db.list_invoices()})
         if path.startswith("/api/invoices/") and path.endswith("/detail"):
@@ -135,11 +144,24 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception:
             return self._json(400, {"error": "Invalid JSON"})
         if path == "/api/login":
-            session = self.db.login(body.get("username", ""), body.get("password", ""))
+            session = self.master_db.login(body.get("username", ""), body.get("password", ""))
             return self._json(200, session) if session else self._json(401, {"error": "Invalid username or password"})
         user = self._user()
         if not user:
             return self._json(401, {"error": "Unauthorized"})
+        if path == "/api/companies":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            try: result=self.company_manager.create_company(body,self.master_db)
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"company":result})
+        if path == "/api/companies/year":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            try: result=self.company_manager.create_year(body.get("company_id"),body.get("year"),user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"company":result})
+        self._select_database()
+        if self.headers.get("X-Company-ID") and self.headers.get("X-Fiscal-Year") and self.company_manager.year_status(self.headers.get("X-Company-ID"),self.headers.get("X-Fiscal-Year"))=="closed":
+            return self._json(423,{"error":"This fiscal year is closed and read-only"})
         if user["role"] == "viewer":
             return self._json(403,{"error":"Viewer access is read-only"})
         if path == "/api/parties":
@@ -243,6 +265,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         user = self._user()
         if not user:
             return self._json(401, {"error": "Unauthorized"})
+        if path.startswith("/api/companies/"):
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            try: result=self.company_manager.update_company(path.rsplit("/",1)[-1],self._body())
+            except KeyError: return self._json(404,{"error":"Company not found"})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"company":result})
+        self._select_database()
+        if self.headers.get("X-Company-ID") and self.headers.get("X-Fiscal-Year") and self.company_manager.year_status(self.headers.get("X-Company-ID"),self.headers.get("X-Fiscal-Year"))=="closed":
+            return self._json(423,{"error":"This fiscal year is closed and read-only"})
         if user["role"] == "viewer":
             return self._json(403,{"error":"Viewer access is read-only"})
         if path.startswith("/api/invoices/"):
@@ -273,7 +304,7 @@ def run_server(host="127.0.0.1", port=8765, database="saber_accounting.db", admi
     admin_password = admin_password or os.environ.get("SABER_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
     db = Database(database)
     db.initialize(admin_password)
-    ApiHandler.db = db
+    ApiHandler.db = db; ApiHandler.master_db=db; ApiHandler.company_manager=CompanyManager(database)
     server = ThreadingHTTPServer((host, port), ApiHandler)
     print(f"Saber Accounting server running at http://{host}:{port}")
     print("For a new database, sign in as admin with this one-time initial password:")
