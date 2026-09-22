@@ -44,6 +44,7 @@ class SaberApp(tk.Tk):
         self.import_view_currency = tk.StringVar(value="All Currencies")
         self.trial_from_date = tk.StringVar()
         self.trial_to_date = tk.StringVar()
+        self.trial_account = tk.StringVar(); self.trial_scope=tk.StringVar(value="Detailed Trial Balance"); self.trial_display_currency=tk.StringVar(value="USD + LBP")
         self.statement_party = tk.StringVar()
         self.statement_from_date = tk.StringVar()
         self.statement_to_date = tk.StringVar()
@@ -343,6 +344,7 @@ class SaberApp(tk.Tk):
         lifecycle=tk.Frame(self.invoices_tab,bg=LIGHT); lifecycle.pack(pady=(0,8))
         self.action_button(lifecycle,"Duplicate",self.duplicate_selected_invoice).pack(side="left",padx=4)
         tk.Button(lifecycle,text="Cancel Invoice",command=self.cancel_selected_invoice,bg="#8B1E1E",fg="white",border=0,padx=15,pady=7).pack(side="left",padx=4)
+        tk.Button(lifecycle,text="Delete Selected",command=self.delete_selected_invoice,bg="#6B1010",fg="white",border=0,padx=15,pady=7).pack(side="left",padx=4)
         self.action_button(lifecycle,"Attach PDF / Image",self.attach_to_selected_invoice).pack(side="left",padx=4)
         self.action_button(lifecycle,"Attachments",self.show_selected_attachments).pack(side="left",padx=4)
         self.action_button(lifecycle,"History",self.show_invoice_history).pack(side="left",padx=4)
@@ -461,6 +463,14 @@ class SaberApp(tk.Tk):
         if not selected:
             messagebox.showwarning("Invoices","Select one invoice row first"); return None
         return int(selected[0])
+
+    def delete_selected_invoice(self):
+        invoice_id=self.selected_invoice_id()
+        if invoice_id is None: return
+        if not messagebox.askyesno("Delete Uploaded Data","Permanently delete the selected row and its journal entry?\nThis action is recorded in the audit log."): return
+        try: self.client.delete_invoice(invoice_id)
+        except Exception as exc: return messagebox.showerror("Delete Uploaded Data",str(exc))
+        self.load_invoices(); self.load_dashboard(); self.load_journal(); self.load_trial(); messagebox.showinfo("Uploaded Data","Selected row deleted")
 
     def duplicate_selected_invoice(self):
         invoice_id=self.selected_invoice_id()
@@ -997,6 +1007,7 @@ class SaberApp(tk.Tk):
         self.action_button(actions,"Export Excel",lambda:self.journal_report("xlsx")).pack(side="left",padx=4)
         self.action_button(actions,"Export PDF",lambda:self.journal_report("pdf")).pack(side="left",padx=4)
         self.action_button(actions,"Print",lambda:self.journal_report("print")).pack(side="left",padx=4)
+        tk.Button(actions,text="Delete Selected Voucher",command=self.delete_selected_journal_voucher,bg="#6B1010",fg="white",border=0,padx=14,pady=7).pack(side="left",padx=4)
         self.journal_totals=tk.Label(actions,text="Debit: 0.00   Credit: 0.00",bg=LIGHT,font=("Segoe UI",10,"bold"))
         self.journal_totals.pack(side="left",padx=15)
         self.load_journal()
@@ -1029,6 +1040,17 @@ class SaberApp(tk.Tk):
         debit=sum(float(row["debit"] or 0) for row in rows); credit=sum(float(row["credit"] or 0) for row in rows)
         state="Balanced" if abs(debit-credit)<0.005 else "UNBALANCED"
         self.journal_totals.config(text=f"Debit: {debit:,.2f}   Credit: {credit:,.2f}   {state}")
+
+    def delete_selected_journal_voucher(self):
+        selected=self.journal_tree.selection()
+        if not selected: return messagebox.showwarning("General Journal","Select a Journal Voucher line first")
+        entry_number=str(self.journal_tree.item(selected[0],"values")[0])
+        row=next((item for item in getattr(self,"journal_rows",[]) if str(item["entry_number"])==entry_number),None)
+        if not row: return messagebox.showwarning("General Journal","Selected entry was not found")
+        if not messagebox.askyesno("Delete Journal Voucher",f"Delete {entry_number} and all its debit/credit lines?\nThis action is recorded in the audit log."): return
+        try: self.client.delete_journal_voucher(row["entry_id"])
+        except Exception as exc: return messagebox.showerror("Delete Journal Voucher",str(exc))
+        self.load_journal(); self.load_invoices(); self.load_dashboard(); self.load_trial(); messagebox.showinfo("General Journal","Journal Voucher deleted")
 
     def journal_report(self,format_name):
         rows=getattr(self,"journal_rows",[])
@@ -1413,12 +1435,14 @@ class SaberApp(tk.Tk):
         tk.Label(filters,text="To Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
         tk.Entry(filters,textvariable=self.trial_to_date,width=13).pack(side="left",padx=(5,10))
         tk.Label(filters,text="DD-MM-YYYY",bg=LIGHT,fg="#5f6b76").pack(side="left",padx=(0,10))
+        tk.Label(filters,text="Account:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
+        self.account_search_box(filters,self.trial_account,20).pack(side="left",padx=4)
+        ttk.Combobox(filters,textvariable=self.trial_scope,values=["Detailed Trial Balance","Main Account Summary"],state="readonly",width=20).pack(side="left",padx=4)
+        ttk.Combobox(filters,textvariable=self.trial_display_currency,values=["USD Only","LBP Only","USD + LBP"],state="readonly",width=11).pack(side="left",padx=4)
         tk.Button(filters,text="Apply",command=self.apply_trial_date_filter,bg=GOLD,fg=NAVY,
                   font=("Segoe UI",9,"bold"),border=0,padx=16,pady=6).pack(side="left")
-        self.trial_tree=self.table(self.trial_tab,[("currency","Original",70),("code","Account",90),("name","Name",170),
-            ("debit","Orig. D",90),("credit","Orig. C",90),("balance","Orig. Balance",105),
-            ("usd_debit","USD D",90),("usd_credit","USD C",90),("usd_balance","USD Balance",105),
-            ("lbp_debit","LBP D",100),("lbp_credit","LBP C",100),("lbp_balance","LBP Balance",115)])
+        self.trial_tree=self.table(self.trial_tab,[("currency","Currency",80),("code","Account",105),("name","Account Name",270),
+            ("opening","Opening Balance",130),("debit","Debit",125),("credit","Credit",125),("closing","Closing Balance",140)])
         actions=tk.Frame(self.trial_tab,bg=LIGHT); actions.pack(pady=(0,10))
         self.action_button(actions,tr(self.language.get(),"refresh"),self.load_trial).pack(side="left",padx=4)
         self.action_button(actions,"Export Excel",lambda:self.export_report("trial","xlsx")).pack(side="left",padx=4)
@@ -1452,15 +1476,50 @@ class SaberApp(tk.Tk):
         date_range = self.trial_date_range()
         if date_range is None:
             return
-        try: rows=self.client.trial_balance(*date_range)
+        account=self.trial_account.get().split(" - ",1)[0].strip() or None
+        try: rows=self.client.trial_balance(*date_range,account,True)
         except Exception as exc: return messagebox.showerror("Error",str(exc))
-        selected=self.view_currency.get()
-        rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
+        targets=["USD","LBP"] if self.trial_display_currency.get()=="USD + LBP" else ["USD" if self.trial_display_currency.get()=="USD Only" else "LBP"]
+        displayed=[]
+        for target in targets:
+            prefix=target.lower(); grouped={}
+            for row in rows:
+                item=grouped.setdefault((row["code"],row["name_en"]),{"currency":target,"code":row["code"],"name_en":row["name_en"],"opening":0.0,"debit":0.0,"credit":0.0,"closing_balance":0.0})
+                item["opening"]+=float(row[prefix+"_opening"]); item["debit"]+=float(row[prefix+"_debit"]); item["credit"]+=float(row[prefix+"_credit"]); item["closing_balance"]+=float(row[prefix+"_closing_balance"])
+            displayed.extend(grouped.values())
+        rows=displayed
+        if self.trial_scope.get()=="Main Account Summary":
+            try: accounts=self.client.accounts()
+            except Exception: accounts=[]
+            parents={str(item["code"]):str(item.get("parent_code") or "") for item in accounts}; names={str(item["code"]):item["name_en"] for item in accounts}
+            def root(code):
+                seen=set(); current=str(code)
+                while parents.get(current) and current not in seen: seen.add(current); current=parents[current]
+                return current
+            summary={}
+            for row in rows:
+                code=root(row["code"]); key=(row["currency"],code)
+                item=summary.setdefault(key,{"currency":row["currency"],"code":code,"name_en":names.get(code,row["name_en"]),"opening":0.0,"debit":0.0,"credit":0.0,"closing_balance":0.0})
+                for field in ("opening","debit","credit","closing_balance"): item[field]+=float(row.get(field,0))
+            rows=list(summary.values())
+        def account_sort(row):
+            digits="".join(character for character in str(row.get("code", "")) if character.isdigit())
+            return (str(row.get("currency","")),int(digits or 0),str(row.get("code","")))
+        ordered=[]
+        for currency in targets:
+            currency_rows=sorted([row for row in rows if row["currency"]==currency],key=account_sort)
+            classes={}
+            for row in currency_rows:
+                class_code=next((character for character in str(row["code"]) if character.isdigit()),"Other")
+                classes.setdefault(class_code,[]).append(row)
+            for class_code in sorted(classes,key=lambda value:int(value) if str(value).isdigit() else 99):
+                class_rows=classes[class_code]; ordered.extend(class_rows)
+                ordered.append({"currency":currency,"code":f"CLASS {class_code}","name_en":"CLASS TOTAL","opening":sum(r["opening"] for r in class_rows),"debit":sum(r["debit"] for r in class_rows),"credit":sum(r["credit"] for r in class_rows),"closing_balance":sum(r["closing_balance"] for r in class_rows),"row_type":"class_total"})
+            ordered.append({"currency":currency,"code":"","name_en":"TOTAL TRIAL BALANCE","opening":sum(r["opening"] for r in currency_rows),"debit":sum(r["debit"] for r in currency_rows),"credit":sum(r["credit"] for r in currency_rows),"closing_balance":sum(r["closing_balance"] for r in currency_rows),"row_type":"currency_total"})
+        rows=ordered
         self.trial_rows=rows; self.trial_tree.delete(*self.trial_tree.get_children())
-        for r in rows: self.trial_tree.insert("","end",values=(r["currency"],r["code"],r["name_en"],
-            f'{r["debit"] or 0:,.2f}',f'{r["credit"] or 0:,.2f}',f'{r["balance"] or 0:,.2f}',
-            f'{r["usd_debit"] or 0:,.2f}',f'{r["usd_credit"] or 0:,.2f}',f'{r["usd_balance"] or 0:,.2f}',
-            f'{r["lbp_debit"] or 0:,.2f}',f'{r["lbp_credit"] or 0:,.2f}',f'{r["lbp_balance"] or 0:,.2f}'))
+        self.trial_tree.tag_configure("class_total",background="#e8edf2",font=("Segoe UI",9,"bold")); self.trial_tree.tag_configure("currency_total",background=GOLD,foreground=NAVY,font=("Segoe UI",9,"bold"))
+        for r in rows: self.trial_tree.insert("","end",values=(r["currency"],r["code"],r["name_en"],f'{r.get("opening",0):,.2f}',f'{r["debit"] or 0:,.2f}',f'{r["credit"] or 0:,.2f}',f'{r["closing_balance"] or 0:,.2f}'),tags=(r.get("row_type","") or "",))
 
     def action_button(self,parent,text,command):
         return tk.Button(parent,text=text,command=command,bg=NAVY,fg="white",border=0,padx=15,pady=7)
@@ -1473,6 +1532,7 @@ class SaberApp(tk.Tk):
         def search(_event=None):
             typed=variable.get().strip().casefold()
             box["values"]=[value for value in choices if typed in value.casefold()] if typed else choices
+            if len(typed)>=3 and box["values"]: box.after_idle(lambda: box.event_generate("<Down>"))
         def choose(_event=None):
             value=variable.get(); variable.set(value.split(" - ",1)[0].strip() if " - " in value else value.strip())
         box.bind("<KeyRelease>",search); box.bind("<<ComboboxSelected>>",choose); box.bind("<FocusOut>",choose)
@@ -1486,10 +1546,8 @@ class SaberApp(tk.Tk):
             title="Saber Accounting - Trial Balance"
             if self.trial_from_date.get().strip() or self.trial_to_date.get().strip():
                 title += f" ({self.trial_from_date.get().strip() or 'Beginning'} to {self.trial_to_date.get().strip() or 'Today'})"
-            headers=["Original Currency","Account","Name","Original Debit","Original Credit","Original Balance","USD Debit","USD Credit","USD Balance","LBP Debit","LBP Credit","LBP Balance"]
-            rows=[[r["currency"],r["code"],r["name_en"],r["debit"] or 0,r["credit"] or 0,r["balance"] or 0,
-                r["usd_debit"] or 0,r["usd_credit"] or 0,r["usd_balance"] or 0,r["lbp_debit"] or 0,r["lbp_credit"] or 0,r["lbp_balance"] or 0] for r in getattr(self,"trial_rows",[])]
-            rows.append(["","","TOTAL"]+[sum(float(r[index]) for r in rows) for index in range(3,12)])
+            headers=["Currency","Account","Account Name","Opening Balance","Debit","Credit","Closing Balance"]
+            rows=[[r["currency"],r["code"],r["name_en"],r.get("opening",0),r["debit"] or 0,r["credit"] or 0,r.get("closing_balance",0)] for r in getattr(self,"trial_rows",[])]
         if not rows: return messagebox.showwarning("Saber Accounting","No report data to export")
         try:
             if format_name == "print": print_rows(title,headers,rows); return

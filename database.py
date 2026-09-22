@@ -392,7 +392,7 @@ class Database:
     def clear_invoices(self, user_id):
         backup_path = self.backup()
         with self.connect() as db:
-            entry_ids = [r["id"] for r in db.execute("SELECT id FROM journal_entries WHERE source_type='invoice'")]
+            entry_ids = [r["id"] for r in db.execute("SELECT id FROM journal_entries WHERE source_type IN ('invoice','journal_voucher')")]
             if entry_ids:
                 marks = ",".join("?" for _ in entry_ids)
                 db.execute(f"DELETE FROM journal_lines WHERE entry_id IN ({marks})", entry_ids)
@@ -521,6 +521,8 @@ class Database:
                 raise ValueError(f"Journal Voucher is unbalanced. Total Debit {debit}; Total Credit {credit}; Remaining {needed}")
         invoice_id = self.import_invoice(invoice, user_id)
         with self.connect() as db:
+            if str(invoice.get("source_file") or "")=="Journal Voucher":
+                db.execute("UPDATE journal_entries SET source_type='journal_voucher' WHERE source_type='invoice' AND source_id=?",(invoice_id,))
             db.executemany("""INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,subtotal,deductible_subtotal,non_deductible_subtotal,vat_rate,vat,total)
                 VALUES(?,?,?,?,?,?,?,?,?,?)""", [
                 (invoice_id,description,str(quantity),str(unit_price),str(subtotal),str(deductible),str(non_deductible),str(vat_rate),str(vat),str(total))
@@ -529,6 +531,35 @@ class Database:
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id, "manual_entry", "invoice", invoice_id, json.dumps({"items": len(normalized)}), utcnow()))
         return invoice_id
+
+    def delete_invoice(self,invoice_id,user_id):
+        with self.connect() as db:
+            invoice=db.execute("SELECT * FROM invoices WHERE id=?",(int(invoice_id),)).fetchone()
+            if not invoice: raise KeyError(invoice_id)
+            self._assert_period_open(invoice["invoice_date"])
+            details=dict(invoice)
+            db.execute("DELETE FROM journal_entries WHERE source_type IN ('invoice','journal_voucher') AND source_id=?",(int(invoice_id),))
+            db.execute("DELETE FROM invoices WHERE id=?",(int(invoice_id),))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"delete","invoice",int(invoice_id),json.dumps({"invoice_number":details.get("invoice_number"),"party_id":details.get("party_id"),"total":details.get("total")}),utcnow()))
+        return {"deleted":int(invoice_id)}
+
+    def delete_journal_voucher(self,entry_id,user_id):
+        with self.connect() as db:
+            entry=db.execute("SELECT * FROM journal_entries WHERE id=?",(int(entry_id),)).fetchone()
+            if not entry: raise KeyError(entry_id)
+            self._assert_period_open(entry["entry_date"])
+            invoice=None
+            if entry["source_id"]:
+                invoice=db.execute("SELECT id,source_file FROM invoices WHERE id=?",(entry["source_id"],)).fetchone()
+            if entry["source_type"]!="journal_voucher" and (not invoice or invoice["source_file"]!="Journal Voucher"):
+                raise ValueError("Only Journal Voucher entries can be deleted here")
+            details={"entry_number":entry["entry_number"],"description":entry["description"]}
+            if invoice: db.execute("DELETE FROM invoices WHERE id=?",(invoice["id"],))
+            db.execute("DELETE FROM journal_entries WHERE id=?",(int(entry_id),))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"delete","journal_voucher",int(entry_id),json.dumps(details),utcnow()))
+        return {"deleted":int(entry_id)}
 
     def update_invoice(self, invoice_id, item, user_id):
         required = ("invoice_number", "invoice_date", "party_name", "kind", "currency")
@@ -593,7 +624,7 @@ class Database:
                 (str(item["invoice_number"]).strip(), kind, str(item["invoice_date"]).strip(), party["id"], currency,
                  str(subtotal),str(deductible),str(non_deductible),str(vat), str(total), status, supplier_account, vat_account, expense_account,
                  entry_type,str(debit_override),str(credit_override),supplier_side,vat_side,expense_side,expense_no_vat_account,expense_no_vat_side,due_date, payment_status, str(amount_paid), invoice_id))
-            entry = db.execute("SELECT id FROM journal_entries WHERE source_type='invoice' AND source_id=?", (invoice_id,)).fetchone()
+            entry = db.execute("SELECT id FROM journal_entries WHERE source_type IN ('invoice','journal_voucher') AND source_id=?", (invoice_id,)).fetchone()
             description = f"{entry_type.replace('_',' ').title()} {str(item['invoice_number']).strip()}"
             if entry:
                 entry_id = entry["id"]
@@ -681,7 +712,7 @@ class Database:
             if invoice["status"] == "cancelled":
                 raise ValueError("Invoice is already cancelled")
             self._assert_period_open(invoice["invoice_date"])
-            original = db.execute("SELECT * FROM journal_entries WHERE source_type='invoice' AND source_id=?", (invoice_id,)).fetchone()
+            original = db.execute("SELECT * FROM journal_entries WHERE source_type IN ('invoice','journal_voucher') AND source_id=?", (invoice_id,)).fetchone()
             if not original:
                 raise ValueError("Invoice journal entry was not found")
             reverse = db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
@@ -1218,19 +1249,19 @@ class Database:
             row.pop("line_id", None)
         return rows
 
-    def trial_balance(self, from_date=None, to_date=None):
+    def trial_balance(self, from_date=None, to_date=None, account_code=None, include_subaccounts=True):
         conditions = []
         parameters = []
         normalized_date = """CASE
             WHEN e.entry_date GLOB '??-??-????'
                 THEN substr(e.entry_date,7,4)||'-'||substr(e.entry_date,4,2)||'-'||substr(e.entry_date,1,2)
             ELSE e.entry_date END"""
-        if from_date:
-            conditions.append(f"{normalized_date} >= ?")
-            parameters.append(from_date)
         if to_date:
             conditions.append(f"{normalized_date} <= ?")
             parameters.append(to_date)
+        if account_code:
+            conditions.append("a.code LIKE ?" if include_subaccounts else "a.code=?")
+            parameters.append(str(account_code)+"%" if include_subaccounts else str(account_code))
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as db:
             raw=[dict(r) for r in db.execute(f"""SELECT a.code,a.name_en,e.currency,e.entry_date,
@@ -1241,19 +1272,26 @@ class Database:
         for row in raw:
             key=(row["code"],row["name_en"],row["currency"])
             item=totals.setdefault(key,{"code":row["code"],"name_en":row["name_en"],"currency":row["currency"],
-                "debit":0.0,"credit":0.0,"balance":0.0,"usd_debit":0.0,"usd_credit":0.0,"usd_balance":0.0,
-                "lbp_debit":0.0,"lbp_credit":0.0,"lbp_balance":0.0})
+                "opening":0.0,"debit":0.0,"credit":0.0,"balance":0.0,"closing_balance":0.0,
+                "usd_opening":0.0,"usd_debit":0.0,"usd_credit":0.0,"usd_balance":0.0,"usd_closing_balance":0.0,
+                "lbp_opening":0.0,"lbp_debit":0.0,"lbp_credit":0.0,"lbp_balance":0.0,"lbp_closing_balance":0.0})
             date=str(row["entry_date"] or "")
             try: date=datetime.strptime(date,"%d-%m-%Y").strftime("%Y-%m-%d")
             except ValueError: pass
             debit=Decimal(str(row["debit"] or 0)); credit=Decimal(str(row["credit"] or 0))
             usd_d=self._converted_amount(debit,row["currency"],"USD",date); usd_c=self._converted_amount(credit,row["currency"],"USD",date)
             lbp_d=self._converted_amount(debit,row["currency"],"LBP",date); lbp_c=self._converted_amount(credit,row["currency"],"LBP",date)
+            if from_date and date<from_date:
+                item["opening"]+=float(debit-credit); item["usd_opening"]+=float(usd_d-usd_c); item["lbp_opening"]+=float(lbp_d-lbp_c)
+                continue
             for field,value in (("debit",debit),("credit",credit),("usd_debit",usd_d),("usd_credit",usd_c),("lbp_debit",lbp_d),("lbp_credit",lbp_c)): item[field]+=float(value)
         for item in totals.values():
             item["balance"]=item["debit"]-item["credit"]
             item["usd_balance"]=item["usd_debit"]-item["usd_credit"]
             item["lbp_balance"]=item["lbp_debit"]-item["lbp_credit"]
+            item["closing_balance"]=item["opening"]+item["balance"]
+            item["usd_closing_balance"]=item["usd_opening"]+item["usd_balance"]
+            item["lbp_closing_balance"]=item["lbp_opening"]+item["lbp_balance"]
         return list(totals.values())
 
     def general_ledger(self, account_code=None, from_date=None, to_date=None, currency=None):

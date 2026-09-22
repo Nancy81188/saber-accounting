@@ -207,7 +207,7 @@ class SaberAccountingTest(unittest.TestCase):
             db=Database(Path(folder)/"manual.db"); db.initialize("secret")
             user=db.user_for_token(db.login("admin","secret")["token"])
             invoice={"invoice_number":"M-1","invoice_date":"14-09-2026","party_name":"Manual Supplier",
-                     "kind":"purchase","currency":"USD","source_file":"Manual Entry"}
+                     "kind":"purchase","currency":"USD","source_file":"Journal Voucher"}
             items=[
                 {"description":"Automatic VAT","quantity":2,"unit_price":50,"vat_rate":11},
                 {"description":"Edited subtotal","quantity":1,"unit_price":100,"subtotal":90,"vat_rate":5},
@@ -223,6 +223,9 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertEqual(len(lines),3)
             self.assertEqual(float(lines[1]["subtotal"]),90.0)
             self.assertEqual(float(lines[2]["vat"]),1.0)
+            voucher=next(row for row in db.journal() if row["source_id"]==invoice_id)
+            db.delete_journal_voucher(voucher["entry_id"],user["id"])
+            self.assertFalse(any(row["id"]==invoice_id for row in db.list_invoices()))
 
     def test_currency_detection_from_excel_number_formats(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -396,6 +399,11 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertTrue(filtered)
             self.assertAlmostEqual(sum(float(r["debit"] or 0) for r in filtered),222.0)
             self.assertAlmostEqual(sum(float(r["credit"] or 0) for r in filtered),222.0)
+            self.assertTrue(any(abs(float(r["opening"]))>0 for r in filtered))
+            account=filtered[0]["code"]
+            exact=db.trial_balance("2026-09-10","2026-09-20",account,False)
+            self.assertTrue(exact); self.assertTrue(all(r["code"]==account for r in exact))
+            self.assertTrue(all("usd_opening" in r and "lbp_closing_balance" in r for r in exact))
 
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -413,6 +421,7 @@ class SaberAccountingTest(unittest.TestCase):
             db.import_invoice(first,user["id"]); result=db.clear_invoices(user["id"]); db.import_invoice(second,user["id"])
             self.assertEqual(result["deleted"],1); self.assertTrue(Path(result["backup"]).exists())
             invoices=db.list_invoices(); self.assertEqual(len(invoices),1); self.assertEqual(invoices[0]["invoice_number"],"2")
+            db.delete_invoice(invoices[0]["id"],user["id"]); self.assertFalse(db.list_invoices())
 
     def test_multi_company_and_separate_fiscal_year_databases(self):
         with tempfile.TemporaryDirectory() as folder:

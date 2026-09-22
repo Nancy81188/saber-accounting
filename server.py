@@ -113,7 +113,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             from_date = query.get("from_date", [None])[0]
             to_date = query.get("to_date", [None])[0]
-            return self._json(200, {"items": self.db.trial_balance(from_date, to_date)})
+            return self._json(200, {"items": self.db.trial_balance(from_date, to_date,
+                query.get("account",[None])[0],query.get("include_subaccounts",["true"])[0].lower()=="true")})
         if path == "/api/journal":
             query = parse_qs(parsed.query)
             return self._json(200, {"items": self.db.journal(
@@ -299,6 +300,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(200,{"account":account})
         return self._json(404, {"error": "Not found"})
+
+    def do_DELETE(self):
+        path=urlparse(self.path).path; user=self._user()
+        if not user: return self._json(401,{"error":"Unauthorized"})
+        self._select_database()
+        if self.headers.get("X-Company-ID") and self.headers.get("X-Fiscal-Year") and self.company_manager.year_status(self.headers.get("X-Company-ID"),self.headers.get("X-Fiscal-Year"))=="closed":
+            return self._json(423,{"error":"This fiscal year is closed and read-only"})
+        if user["role"]=="viewer": return self._json(403,{"error":"Viewer access is read-only"})
+        try:
+            if path.startswith("/api/invoices/"): result=self.db.delete_invoice(int(path.rsplit("/",1)[-1]),user["id"])
+            elif path.startswith("/api/journal/"): result=self.db.delete_journal_voucher(int(path.rsplit("/",1)[-1]),user["id"])
+            else: return self._json(404,{"error":"Not found"})
+        except KeyError: return self._json(404,{"error":"Entry not found"})
+        except Exception as exc: return self._json(400,{"error":str(exc)})
+        return self._json(200,result)
 
 def run_server(host="127.0.0.1", port=8765, database="saber_accounting.db", admin_password=None):
     admin_password = admin_password or os.environ.get("SABER_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
