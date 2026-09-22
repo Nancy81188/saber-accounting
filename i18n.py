@@ -9,6 +9,10 @@ TRANSLATIONS = {
         "total": "Total", "currency": "Currency", "status": "Status",
         "source_row": "Source Row", "rows_ready": "rows ready", "imported": "rows imported",
         "sales": "Sales", "purchases": "Purchases", "vat_due": "VAT",
+        "manual_entry":"Manual Entry","customers_suppliers":"Customers / Suppliers","payments_expenses":"Payments / Expenses",
+        "general_journal":"General Journal","trial_balance":"Trial Balance","profit_loss":"Profit & Loss",
+        "financial_reports":"Financial Reports","statement_account":"Statement of Account","chart_accounts":"Lebanese Chart of Accounts",
+        "security_backup_rates":"Security / Backup / Rates","previous_tab":"Previous Tab","next_tab":"Next Tab",
     },
     "fr": {
         "title": "Saber Comptabilité", "login": "Connexion", "username": "Utilisateur",
@@ -20,6 +24,10 @@ TRANSLATIONS = {
         "total": "Total", "currency": "Devise", "status": "Statut",
         "source_row": "Ligne source", "rows_ready": "lignes prêtes", "imported": "lignes importées",
         "sales": "Ventes", "purchases": "Achats", "vat_due": "TVA",
+        "manual_entry":"Saisie manuelle","customers_suppliers":"Clients / Fournisseurs","payments_expenses":"Paiements / Dépenses",
+        "general_journal":"Journal général","trial_balance":"Balance générale","profit_loss":"Résultat",
+        "financial_reports":"Rapports financiers","statement_account":"Relevé de compte","chart_accounts":"Plan comptable libanais",
+        "security_backup_rates":"Sécurité / Sauvegarde / Taux","previous_tab":"Onglet précédent","next_tab":"Onglet suivant",
     },
     "ar": {
         "title": "سيبر للمحاسبة", "login": "تسجيل الدخول", "username": "اسم المستخدم",
@@ -31,6 +39,10 @@ TRANSLATIONS = {
         "total": "المجموع", "currency": "العملة", "status": "الحالة",
         "source_row": "سطر المصدر", "rows_ready": "أسطر جاهزة", "imported": "أسطر مستوردة",
         "sales": "المبيعات", "purchases": "المشتريات", "vat_due": "الضريبة",
+        "manual_entry":"إدخال يدوي","customers_suppliers":"العملاء / الموردون","payments_expenses":"الدفعات / المصاريف",
+        "general_journal":"دفتر اليومية","trial_balance":"ميزان المراجعة","profit_loss":"الأرباح والخسائر",
+        "financial_reports":"التقارير المالية","statement_account":"كشف الحساب","chart_accounts":"دليل الحسابات اللبناني",
+        "security_backup_rates":"الأمان / النسخ / العملات","previous_tab":"التبويب السابق","next_tab":"التبويب التالي",
     },
 }
 

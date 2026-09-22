@@ -11,7 +11,7 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 NAVY = "071B2E"
 
@@ -53,3 +53,30 @@ def print_rows(title, headers, rows):
     if os.name != "nt": raise RuntimeError("Printing is available in the Windows application")
     os.startfile(handle.name, "print")
     return handle.name
+
+def export_invoice_pdf(path, invoice, items, logo_path=None):
+    doc=SimpleDocTemplate(str(path),pagesize=A4,rightMargin=16*mm,leftMargin=16*mm,topMargin=12*mm,bottomMargin=12*mm)
+    styles=getSampleStyleSheet(); story=[]
+    if logo_path and os.path.exists(str(logo_path)):
+        story.append(Image(str(logo_path),width=38*mm,height=38*mm))
+    story.extend([
+        Paragraph("SABER FOR AUDIT",styles["Title"]),
+        Paragraph("Accounting & Management Consulting",styles["Heading3"]),
+        Paragraph("Zouk Mosbeh, Keserwan, Lebanon | +961 70 636729 | bassam.saber@saberforaudit.com | saberforaudit.com",styles["Normal"]),
+        Spacer(1,6*mm),
+        Paragraph(f'{invoice["kind"].title()} Invoice {invoice["invoice_number"]}',styles["Heading1"]),
+        Paragraph(f'Date: {invoice["invoice_date"]} &nbsp;&nbsp; Due: {invoice.get("due_date") or "-"} &nbsp;&nbsp; Currency: {invoice["currency"]}',styles["Normal"]),
+        Paragraph(f'Customer / Supplier: {invoice["party_name"]} &nbsp;&nbsp; Payment: {invoice.get("payment_status","unpaid").title()}',styles["Normal"]),
+        Spacer(1,6*mm),
+    ])
+    headers=["Description","Qty","Unit Price","Before VAT","VAT %","VAT","Total"]
+    rows=[[x["description"],x["quantity"],x["unit_price"],x["subtotal"],x["vat_rate"],x["vat"],x["total"]] for x in items]
+    if not rows: rows=[["Invoice total","1",invoice["subtotal"],invoice["subtotal"],"",invoice["vat"],invoice["total"]]]
+    table=Table([headers]+rows,repeatRows=1,colWidths=[65*mm,14*mm,23*mm,25*mm,16*mm,22*mm,24*mm])
+    table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#071B2E")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("GRID",(0,0),(-1,-1),.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),8),
+        ("ALIGN",(1,1),(-1,-1),"RIGHT"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F3F6F8")])]))
+    story.extend([table,Spacer(1,7*mm),Paragraph(f'Before VAT: {invoice["subtotal"]} &nbsp;&nbsp; VAT: {invoice["vat"]} &nbsp;&nbsp; Total: {invoice["total"]} {invoice["currency"]}',styles["Heading2"]),
+        Paragraph(f'Amount Paid: {invoice.get("amount_paid",0)} &nbsp;&nbsp; Outstanding: {invoice.get("outstanding",invoice["total"])}',styles["Normal"]),Spacer(1,10*mm),
+        Paragraph("Thank you for your business.",styles["Normal"])])
+    doc.build(story)

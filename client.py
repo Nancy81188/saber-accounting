@@ -33,6 +33,7 @@ class ApiClient:
         return result
 
     def dashboard(self): return self.request("GET", "/api/dashboard")["items"]
+    def professional_dashboard(self): return self.request("GET","/api/dashboard/professional")
     def invoices(self): return self.request("GET", "/api/invoices")["items"]
     def accounts(self): return self.request("GET", "/api/accounts")["items"]
     def parties(self): return self.request("GET", "/api/parties")["items"]
@@ -58,6 +59,7 @@ class ApiClient:
     def import_invoices(self, items, replace_existing=True): return self.request("POST", "/api/invoices/import", {"items": items, "replace_existing": replace_existing})
     def create_manual_invoice(self, invoice, items): return self.request("POST", "/api/invoices/manual", {"invoice": invoice, "items": items})
     def update_invoice(self, invoice_id, invoice): return self.request("PUT", f"/api/invoices/{invoice_id}", {"invoice": invoice})
+    def invoice_detail(self, invoice_id): return self.request("GET",f"/api/invoices/{invoice_id}/detail")
     def cancel_invoice(self, invoice_id, reason): return self.request("POST",f"/api/invoices/{invoice_id}/cancel",{"reason":reason})["invoice"]
     def duplicate_invoice(self, invoice_id): return self.request("POST",f"/api/invoices/{invoice_id}/duplicate",{})["invoice"]
     def invoice_history(self, invoice_id): return self.request("GET",f"/api/invoices/{invoice_id}/history")["items"]
@@ -86,3 +88,12 @@ class ApiClient:
     def vat_report(self, from_date=None, to_date=None, currency=None):
         query=urlencode({k:v for k,v in {"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v})
         return self.request("GET","/api/vat-report"+(f"?{query}" if query else ""))
+    def users(self): return self.request("GET","/api/users")["items"]
+    def save_user(self,item): return self.request("POST","/api/users",item)["user"]
+    def backups(self): return self.request("GET","/api/backups")["items"]
+    def create_backup(self): return self.request("POST","/api/backups/create",{})
+    def restore_backup(self,name): return self.request("POST","/api/backups/restore",{"name":name})
+    def settings(self): return self.request("GET","/api/settings")
+    def save_settings(self,item): return self.request("POST","/api/settings",item)
+    def exchange_rates(self): return self.request("GET","/api/exchange-rates")["items"]
+    def save_exchange_rate(self,item): return self.request("POST","/api/exchange-rates",item)

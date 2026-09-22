@@ -82,6 +82,12 @@ CREATE TABLE IF NOT EXISTS expenses (
  expense_account TEXT NOT NULL, vat_account TEXT NOT NULL, payment_account TEXT NOT NULL,
  reference TEXT, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS exchange_rates (
+ id INTEGER PRIMARY KEY, rate_date TEXT NOT NULL, from_currency TEXT NOT NULL, to_currency TEXT NOT NULL,
+ rate TEXT NOT NULL, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL,
+ UNIQUE(rate_date,from_currency,to_currency)
+);
+CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 LEGACY_ACCOUNT_MAP = {
@@ -152,6 +158,9 @@ class Database:
                 if column not in invoice_columns:
                     db.execute(f"ALTER TABLE invoices ADD COLUMN {column} {definition}")
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
+            db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('base_currency','USD')")
+            db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('backup_interval_hours','24')")
+            db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('last_scheduled_backup','')")
             db.executemany("""INSERT INTO accounts(code,name_en,name_ar,name_fr,type)
                 VALUES(?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET
                 name_en=excluded.name_en,name_ar=excluded.name_ar,name_fr=excluded.name_fr,type=excluded.type""",
@@ -185,6 +194,33 @@ class Database:
     def user_for_token(self, token):
         with self.connect() as db:
             return db.execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND u.active=1", (token,)).fetchone()
+
+    def list_users(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("SELECT id,username,role,language,active FROM users ORDER BY username")]
+
+    def save_user(self, item, acting_user_id):
+        username=str(item.get("username") or "").strip(); role=str(item.get("role") or "viewer").strip()
+        language=str(item.get("language") or "en").strip(); password=str(item.get("password") or "")
+        active=1 if item.get("active",True) else 0; user_id=item.get("id")
+        if not username or role not in ("admin","accountant","viewer") or language not in ("en","ar","fr"):
+            raise ValueError("Enter a valid username, role, and language")
+        with self.connect() as db:
+            if user_id:
+                if password:
+                    db.execute("UPDATE users SET username=?,role=?,language=?,active=?,password_hash=? WHERE id=?",
+                        (username,role,language,active,hash_password(password),int(user_id)))
+                else:
+                    db.execute("UPDATE users SET username=?,role=?,language=?,active=? WHERE id=?",
+                        (username,role,language,active,int(user_id)))
+                saved_id=int(user_id)
+            else:
+                if not password: raise ValueError("Password is required for a new user")
+                saved_id=db.execute("INSERT INTO users(username,password_hash,role,language,active) VALUES(?,?,?,?,?)",
+                    (username,hash_password(password),role,language,active)).lastrowid
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (acting_user_id,"save","user",saved_id,json.dumps({"username":username,"role":role,"active":active}),utcnow()))
+        return next(row for row in self.list_users() if row["id"]==saved_id)
 
     def _account_id(self, db, code):
         row = db.execute("SELECT id FROM accounts WHERE code=?", (code,)).fetchone()
@@ -228,6 +264,48 @@ class Database:
         target = folder / f"saber_accounting_{datetime.now():%Y%m%d_%H%M%S_%f}.db"
         shutil.copy2(source, target)
         return str(target)
+
+    def list_backups(self):
+        folder=Path(self.path).parent/"backups"
+        if not folder.exists(): return []
+        return [{"name":path.name,"size":path.stat().st_size,"modified":datetime.fromtimestamp(path.stat().st_mtime).isoformat()}
+                for path in sorted(folder.glob("saber_accounting_*.db"),reverse=True)]
+
+    def restore_backup(self, name, user_id):
+        folder=(Path(self.path).parent/"backups").resolve(); source=(folder/Path(str(name)).name).resolve()
+        if source.parent!=folder or not source.exists(): raise ValueError("Backup was not found")
+        safety=self.backup(); shutil.copy2(source,self.path)
+        with self.connect() as db:
+            db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",
+                (user_id,"restore","database",json.dumps({"backup":source.name,"safety_backup":safety}),utcnow()))
+        return {"restored":source.name,"safety_backup":safety}
+
+    def settings(self):
+        with self.connect() as db: return {row["key"]:row["value"] for row in db.execute("SELECT key,value FROM app_settings")}
+
+    def save_settings(self, values, user_id):
+        allowed={"base_currency","backup_interval_hours"}
+        if str(values.get("base_currency") or "USD") not in ("USD","EUR","LBP","AED"): raise ValueError("Invalid base currency")
+        try: hours=int(values.get("backup_interval_hours",24))
+        except Exception as exc: raise ValueError("Backup interval must be a number") from exc
+        if hours<1 or hours>720: raise ValueError("Backup interval must be between 1 and 720 hours")
+        with self.connect() as db:
+            for key in allowed:
+                if key in values: db.execute("INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(key,str(values[key])))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",
+                (user_id,"update","settings",json.dumps({key:values[key] for key in allowed if key in values}),utcnow()))
+        return self.settings()
+
+    def maybe_scheduled_backup(self):
+        settings=self.settings(); hours=int(settings.get("backup_interval_hours","24")); last=settings.get("last_scheduled_backup","")
+        try: due=(datetime.now(timezone.utc)-datetime.fromisoformat(last)).total_seconds()>=hours*3600
+        except Exception: due=True
+        if due:
+            path=self.backup()
+            with self.connect() as db:
+                db.execute("INSERT INTO app_settings(key,value) VALUES('last_scheduled_backup',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(utcnow(),))
+            return path
+        return None
 
     def clear_invoices(self, user_id):
         backup_path = self.backup()
@@ -527,6 +605,12 @@ class Database:
             raise KeyError(invoice_id)
         return row
 
+    def invoice_detail(self, invoice_id):
+        invoice=self.get_invoice(invoice_id)
+        with self.connect() as db:
+            items=[dict(row) for row in db.execute("SELECT description,quantity,unit_price,subtotal,vat_rate,vat,total FROM invoice_items WHERE invoice_id=? ORDER BY id",(invoice_id,))]
+        return {"invoice":invoice,"items":items}
+
     def add_attachment(self, invoice_id, file_name, mime_type, content, user_id):
         if not file_name or not content:
             raise ValueError("Attachment file is required")
@@ -705,6 +789,52 @@ class Database:
             return [dict(row) for row in db.execute("""SELECT id,expense_date,description,category,currency,
                 CAST(subtotal AS REAL) subtotal,CAST(vat AS REAL) vat,CAST(total AS REAL) total,
                 expense_account,vat_account,payment_account,reference FROM expenses ORDER BY id DESC""")]
+
+    def save_exchange_rate(self, item, user_id):
+        date=str(item.get("rate_date") or "").strip(); self._date_year(date)
+        source=str(item.get("from_currency") or "").upper(); target=str(item.get("to_currency") or "").upper()
+        rate=Decimal(str(item.get("rate") or 0))
+        if source not in ("USD","EUR","LBP","AED") or target not in ("USD","EUR","LBP","AED") or source==target or rate<=0:
+            raise ValueError("Enter two different currencies and a positive rate")
+        with self.connect() as db:
+            db.execute("""INSERT INTO exchange_rates(rate_date,from_currency,to_currency,rate,created_by,created_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(rate_date,from_currency,to_currency) DO UPDATE SET rate=excluded.rate,
+                created_by=excluded.created_by,created_at=excluded.created_at""",(date,source,target,str(rate),user_id,utcnow()))
+        return True
+
+    def list_exchange_rates(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT id,rate_date,from_currency,to_currency,CAST(rate AS REAL) rate,created_at
+                FROM exchange_rates ORDER BY id DESC""")]
+
+    def professional_dashboard(self):
+        invoice_rows=self.dashboard(); expenses=self.list_expenses()
+        metrics={}
+        for row in invoice_rows:
+            code=row["currency"]; metrics.setdefault(code,{"currency":code,"sales":0.0,"purchases":0.0,"expenses":0.0,"profit":0.0,"receivables":0.0,"payables":0.0,"overdue":0})
+            amount=float(row["subtotal"] or 0)
+            if row["kind"]=="sale": metrics[code]["sales"]+=amount
+            else: metrics[code]["purchases"]+=amount
+        for row in expenses:
+            code=row["currency"]; metrics.setdefault(code,{"currency":code,"sales":0.0,"purchases":0.0,"expenses":0.0,"profit":0.0,"receivables":0.0,"payables":0.0,"overdue":0})
+            metrics[code]["expenses"]+=float(row["subtotal"] or 0)
+        today=datetime.now().date()
+        with self.connect() as db:
+            invoices=[dict(row) for row in db.execute("SELECT kind,currency,total,amount_paid,due_date,status FROM invoices WHERE status!='cancelled'")]
+            monthly=[dict(row) for row in db.execute("""SELECT substr(CASE WHEN invoice_date GLOB '??-??-????' THEN substr(invoice_date,7,4)||'-'||substr(invoice_date,4,2)||'-'||substr(invoice_date,1,2) ELSE invoice_date END,1,7) month,
+                currency,kind,SUM(CAST(subtotal AS REAL)) amount FROM invoices WHERE status!='cancelled' GROUP BY month,currency,kind ORDER BY month""")]
+        for row in invoices:
+            code=row["currency"]; metrics.setdefault(code,{"currency":code,"sales":0.0,"purchases":0.0,"expenses":0.0,"profit":0.0,"receivables":0.0,"payables":0.0,"overdue":0})
+            outstanding=float(row["total"] or 0)-float(row["amount_paid"] or 0)
+            if row["kind"]=="sale": metrics[code]["receivables"]+=outstanding
+            else: metrics[code]["payables"]+=outstanding
+            if outstanding>0 and row.get("due_date"):
+                try:
+                    due=datetime.strptime(row["due_date"],"%d-%m-%Y").date()
+                    if due<today: metrics[code]["overdue"]+=1
+                except ValueError: pass
+        for value in metrics.values(): value["profit"]=value["sales"]-value["purchases"]-value["expenses"]
+        return {"metrics":list(metrics.values()),"monthly":monthly}
 
     def statement_of_account(self, party_id, from_date=None, to_date=None, currency=None):
         normalized_date = """CASE

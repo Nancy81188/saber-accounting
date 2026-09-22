@@ -30,7 +30,11 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _user(self):
         auth = self.headers.get("Authorization", "")
         token = auth[7:] if auth.startswith("Bearer ") else ""
-        return self.db.user_for_token(token)
+        user=self.db.user_for_token(token)
+        if user:
+            try: self.db.maybe_scheduled_backup()
+            except Exception: pass
+        return user
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -42,6 +46,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "Unauthorized"})
         if path == "/api/invoices":
             return self._json(200, {"items": self.db.list_invoices()})
+        if path.startswith("/api/invoices/") and path.endswith("/detail"):
+            try: result=self.db.invoice_detail(int(path.split("/")[-2]))
+            except KeyError: return self._json(404,{"error":"Invoice not found"})
+            return self._json(200,result)
         if path.startswith("/api/invoices/") and path.endswith("/history"):
             try: invoice_id=int(path.split("/")[-2]); items=self.db.invoice_history(invoice_id)
             except Exception as exc: return self._json(400,{"error":str(exc)})
@@ -79,6 +87,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(200, result)
         if path == "/api/dashboard":
             return self._json(200, {"items": self.db.dashboard()})
+        if path == "/api/dashboard/professional": return self._json(200,self.db.professional_dashboard())
+        if path == "/api/users":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            return self._json(200,{"items":self.db.list_users()})
+        if path == "/api/backups":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            return self._json(200,{"items":self.db.list_backups()})
+        if path == "/api/settings": return self._json(200,self.db.settings())
+        if path == "/api/exchange-rates": return self._json(200,{"items":self.db.list_exchange_rates()})
         if path == "/api/trial-balance":
             query = parse_qs(parsed.query)
             from_date = query.get("from_date", [None])[0]
@@ -125,6 +142,28 @@ class ApiHandler(BaseHTTPRequestHandler):
             try: result=self.db.save_party(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"party":result})
+        if path == "/api/users":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            try: result=self.db.save_user(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"user":result})
+        if path == "/api/backups/create":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            return self._json(200,{"path":self.db.backup()})
+        if path == "/api/backups/restore":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            try: result=self.db.restore_backup(body.get("name"),user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
+        if path == "/api/settings":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            try: result=self.db.save_settings(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
+        if path == "/api/exchange-rates":
+            try: self.db.save_exchange_rate(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"saved":True})
         if path == "/api/payments":
             try: payment_id=self.db.add_payment(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})

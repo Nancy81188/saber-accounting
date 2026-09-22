@@ -5,7 +5,7 @@ from openpyxl import Workbook
 from database import Database
 from importer import read_invoices
 from lebanese_accounts import LEBANESE_ACCOUNTS
-from report_export import export_excel, export_pdf
+from report_export import export_excel, export_invoice_pdf, export_pdf
 from desktop import row_matches_search
 
 class SaberAccountingTest(unittest.TestCase):
@@ -179,6 +179,24 @@ class SaberAccountingTest(unittest.TestCase):
             db.close_fiscal_year(2026,user["id"])
             with self.assertRaisesRegex(ValueError,"closed"):
                 db.add_expense({"expense_date":"31-12-2026","description":"Late","currency":"USD","subtotal":1,"vat":0},user["id"])
+
+    def test_security_backup_rates_dashboard_and_branded_invoice(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"complete.db"); db.initialize("secret")
+            admin=db.user_for_token(db.login("admin","secret")["token"])
+            saved=db.save_user({"username":"viewer1","password":"Viewer123!","role":"viewer","language":"fr","active":True},admin["id"])
+            self.assertEqual(saved["role"],"viewer"); self.assertEqual(len(db.list_users()),2)
+            db.save_settings({"base_currency":"EUR","backup_interval_hours":"12"},admin["id"])
+            self.assertEqual(db.settings()["base_currency"],"EUR")
+            db.save_exchange_rate({"rate_date":"22-09-2026","from_currency":"USD","to_currency":"LBP","rate":"89500"},admin["id"])
+            self.assertEqual(db.list_exchange_rates()[0]["rate"],89500.0)
+            backup=db.backup(); self.assertTrue(Path(backup).exists()); self.assertTrue(db.list_backups())
+            invoice_id=db.create_manual_invoice({"invoice_number":"","invoice_date":"22-09-2026","party_name":"Client","kind":"sale","currency":"USD","due_date":"01-09-2026"},
+                [{"description":"Audit service","quantity":1,"unit_price":100,"vat_rate":11}],admin["id"])
+            dashboard=db.professional_dashboard(); self.assertEqual(dashboard["metrics"][0]["sales"],100.0); self.assertEqual(dashboard["metrics"][0]["overdue"],1)
+            detail=db.invoice_detail(invoice_id); pdf=Path(folder)/"invoice.pdf"
+            export_invoice_pdf(pdf,detail["invoice"],detail["items"])
+            self.assertGreater(pdf.stat().st_size,1000)
 
     def test_manual_invoice_items_editable_subtotal_and_vat(self):
         with tempfile.TemporaryDirectory() as folder:

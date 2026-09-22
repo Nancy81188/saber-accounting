@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 import sys
 import mimetypes
+import time
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -10,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 from client import ApiClient
 from i18n import tr
 from importer import read_invoices
-from report_export import export_excel, export_pdf, print_rows
+from report_export import export_excel, export_invoice_pdf, export_pdf, print_rows
 
 NAVY, GOLD, LIGHT = "#071b2e", "#c9a96a", "#f3f6f8"
 
@@ -35,6 +36,8 @@ class SaberApp(tk.Tk):
         self.configure(bg=LIGHT)
         self.language = tk.StringVar(value="en")
         self.client = None
+        self.current_user = None
+        self.last_activity = time.monotonic()
         self.import_rows = []
         self.manual_items = []
         self.view_currency = tk.StringVar(value="All Currencies")
@@ -94,7 +97,8 @@ class SaberApp(tk.Tk):
     def login(self):
         try:
             self.client = ApiClient(self.server.get())
-            self.client.login(self.username.get(), self.password.get())
+            self.current_user=self.client.login(self.username.get(), self.password.get())
+            self.last_activity=time.monotonic(); self.bind_all("<Any-KeyPress>",self.record_activity); self.bind_all("<Any-Button>",self.record_activity); self.after(60000,self.check_auto_logout)
             self.main_screen()
         except Exception as exc: messagebox.showerror("Saber Accounting", str(exc))
 
@@ -108,22 +112,40 @@ class SaberApp(tk.Tk):
             pass
         tk.Label(top,text=tr(lang,"title"),bg=NAVY,fg="white",font=("Segoe UI",20,"bold")).pack(side="left",padx=8,pady=19)
         tk.Label(top,text="11% VAT  |  USD · LBP · EUR · AED",bg=NAVY,fg=GOLD,font=("Segoe UI",10,"bold")).pack(side="right",padx=28)
+        tab_nav=tk.Frame(self,bg=LIGHT); tab_nav.pack(fill="x",padx=18,pady=(8,0))
         notebook=ttk.Notebook(self); self.main_notebook=notebook; notebook.pack(fill="both",expand=True,padx=18,pady=16)
-        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.parties_tab=tk.Frame(notebook,bg=LIGHT); self.transactions_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.reports_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT)
-        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text="Manual Entry"); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.parties_tab,text="Customers / Suppliers"); notebook.add(self.transactions_tab,text="Payments / Expenses"); notebook.add(self.journal_tab,text="General Journal"); notebook.add(self.trial_tab,text="Trial Balance"); notebook.add(self.pnl_tab,text="Profit & Loss"); notebook.add(self.reports_tab,text="Financial Reports"); notebook.add(self.statement_tab,text="Statement of Account"); notebook.add(self.accounts_tab,text="Lebanese Chart of Accounts")
+        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.parties_tab=tk.Frame(notebook,bg=LIGHT); self.transactions_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.reports_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT); self.settings_tab=tk.Frame(notebook,bg=LIGHT)
+        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text=tr(lang,"manual_entry")); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.parties_tab,text=tr(lang,"customers_suppliers")); notebook.add(self.transactions_tab,text=tr(lang,"payments_expenses")); notebook.add(self.journal_tab,text=tr(lang,"general_journal")); notebook.add(self.trial_tab,text=tr(lang,"trial_balance")); notebook.add(self.pnl_tab,text=tr(lang,"profit_loss")); notebook.add(self.reports_tab,text=tr(lang,"financial_reports")); notebook.add(self.statement_tab,text=tr(lang,"statement_account")); notebook.add(self.accounts_tab,text=tr(lang,"chart_accounts")); notebook.add(self.settings_tab,text=tr(lang,"security_backup_rates"))
+        self.tab_names=[notebook.tab(tab,"text") for tab in notebook.tabs()]
+        self.tab_choice=tk.StringVar(value=self.tab_names[0])
+        tk.Button(tab_nav,text="◀ "+tr(lang,"previous_tab"),command=lambda:self.move_main_tab(-1),bg=NAVY,fg="white",border=0,padx=12,pady=5).pack(side="left",padx=3)
+        chooser=ttk.Combobox(tab_nav,textvariable=self.tab_choice,values=self.tab_names,state="readonly",width=32)
+        chooser.pack(side="left",padx=5); chooser.bind("<<ComboboxSelected>>",lambda _event:self.select_named_tab())
+        tk.Button(tab_nav,text=tr(lang,"next_tab")+" ▶",command=lambda:self.move_main_tab(1),bg=NAVY,fg="white",border=0,padx=12,pady=5).pack(side="left",padx=3)
+        tk.Label(tab_nav,text="Use these buttons to reach tabs that do not fit on screen",bg=LIGHT,fg="#5f6b76").pack(side="left",padx=12)
+        notebook.bind("<<NotebookTabChanged>>",lambda _event:self.tab_choice.set(notebook.tab(notebook.select(),"text")))
         filter_bar=tk.Frame(self,bg=LIGHT); filter_bar.pack(fill="x",padx=28)
         tk.Label(filter_bar,text="Show currency:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
         currency_filter=ttk.Combobox(filter_bar,textvariable=self.view_currency,values=["All Currencies","USD","EUR","LBP","AED"],state="readonly",width=16)
         currency_filter.pack(side="left",padx=8); currency_filter.bind("<<ComboboxSelected>>",lambda _event:self.currency_changed())
-        tk.Button(filter_bar,text="Next Tab ▶",command=lambda:self.move_main_tab(1),bg=NAVY,fg="white",border=0,padx=12,pady=4).pack(side="right",padx=3)
-        tk.Button(filter_bar,text="◀ Previous Tab",command=lambda:self.move_main_tab(-1),bg=NAVY,fg="white",border=0,padx=12,pady=4).pack(side="right",padx=3)
-        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_parties(); self.build_transactions(); self.build_journal(); self.build_trial(); self.build_profit_loss(); self.build_financial_reports(); self.build_statement(); self.build_accounts()
+        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_parties(); self.build_transactions(); self.build_journal(); self.build_trial(); self.build_profit_loss(); self.build_financial_reports(); self.build_statement(); self.build_accounts(); self.build_settings()
+
+    def record_activity(self,_event=None): self.last_activity=time.monotonic()
+
+    def check_auto_logout(self):
+        if self.client and time.monotonic()-self.last_activity>=1800:
+            self.client=None; self.current_user=None; self.login_screen(); messagebox.showinfo("Saber Accounting","Signed out automatically after 30 minutes of inactivity"); return
+        self.after(60000,self.check_auto_logout)
 
     def move_main_tab(self,direction):
         tabs=self.main_notebook.tabs()
         if not tabs: return
         current=self.main_notebook.index("current")
-        self.main_notebook.select((current+direction)%len(tabs))
+        target=(current+direction)%len(tabs); self.main_notebook.select(target); self.tab_choice.set(self.main_notebook.tab(target,"text"))
+
+    def select_named_tab(self):
+        try: self.main_notebook.select(self.tab_names.index(self.tab_choice.get()))
+        except ValueError: pass
 
     def currency_changed(self):
         self.load_dashboard(); self.load_invoices(); self.load_journal(); self.load_trial(); self.load_profit_loss(); self.load_financial_reports()
@@ -177,12 +199,24 @@ class SaberApp(tk.Tk):
         tree.insert=tracked_insert
         tree.delete=tracked_delete
         tree.search_var=search_var
+        tree._sort_reverse={}
+        def sort_column(key):
+            reverse=tree._sort_reverse.get(key,False)
+            def sortable(value):
+                clean=str(value).replace(",","").strip()
+                try: return (0,float(clean))
+                except ValueError: return (1,clean.casefold())
+            ordered=sorted(tree.get_children(""),key=lambda item:sortable(tree.set(item,key)),reverse=reverse)
+            for position,item in enumerate(ordered): tree.move(item,"",position)
+            tree._sort_reverse[key]=not reverse
+        for key,label,_width in columns: tree.heading(key,text=label,command=lambda column=key:sort_column(column))
         search_var.trace_add("write",apply_search)
         search_entry.bind("<Escape>",lambda _event:search_var.set(""))
         return tree
 
     def build_dashboard(self):
-        self.dashboard_tree=self.table(self.dashboard_tab,[("kind","Type",110),("currency","Currency",85),("count","Invoices",85),("subtotal","Before VAT",125),("vat","VAT",105),("total","Total",125),("debit","Debit",125),("credit","Credit",125)])
+        self.dashboard_tree=self.table(self.dashboard_tab,[("currency","Currency",85),("sales","Sales",120),("purchases","Purchases",120),("expenses","Expenses",120),("profit","Net Profit",120),("receivables","Receivables",120),("payables","Payables",120),("overdue","Overdue",80)])
+        self.dashboard_chart=tk.Canvas(self.dashboard_tab,height=150,bg="white",highlightthickness=0); self.dashboard_chart.pack(fill="x",padx=10,pady=(0,8))
         actions=tk.Frame(self.dashboard_tab,bg=LIGHT); actions.pack(pady=(0,10))
         self.action_button(actions,tr(self.language.get(),"refresh"),self.load_dashboard).pack(side="left",padx=4)
         self.action_button(actions,"Export Excel",lambda:self.export_report("dashboard","xlsx")).pack(side="left",padx=4)
@@ -191,12 +225,24 @@ class SaberApp(tk.Tk):
         self.load_dashboard()
 
     def load_dashboard(self):
-        try: rows=self.client.dashboard()
+        try: data=self.client.professional_dashboard(); rows=data["metrics"]
         except Exception as exc: return messagebox.showerror("Error",str(exc))
         selected=self.view_currency.get()
         rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
         self.dashboard_rows=rows; self.dashboard_tree.delete(*self.dashboard_tree.get_children())
-        for r in rows: self.dashboard_tree.insert("", "end", values=(r["kind"],r["currency"],r["count"],f'{r["subtotal"]:,.2f}',f'{r["vat"]:,.2f}',f'{r["total"]:,.2f}',f'{r["debit"]:,.2f}',f'{r["credit"]:,.2f}'))
+        for r in rows: self.dashboard_tree.insert("", "end", values=(r["currency"],f'{r["sales"]:,.2f}',f'{r["purchases"]:,.2f}',f'{r["expenses"]:,.2f}',f'{r["profit"]:,.2f}',f'{r["receivables"]:,.2f}',f'{r["payables"]:,.2f}',r["overdue"]))
+        self.draw_dashboard_chart([r for r in data.get("monthly",[]) if selected=="All Currencies" or r["currency"]==selected])
+
+    def draw_dashboard_chart(self,rows):
+        canvas=self.dashboard_chart; canvas.delete("all"); canvas.update_idletasks(); width=max(canvas.winfo_width(),700); height=145
+        values=[float(row["amount"] or 0) for row in rows[-12:]]; maximum=max(values or [1])
+        canvas.create_text(10,10,anchor="nw",text="Monthly Sales / Purchases",fill=NAVY,font=("Segoe UI",10,"bold"))
+        for index,row in enumerate(rows[-12:]):
+            x=20+index*max(48,(width-40)//max(1,min(12,len(rows))))
+            bar_height=(float(row["amount"] or 0)/maximum)*90
+            color="#1F6E8C" if row["kind"]=="sale" else GOLD
+            canvas.create_rectangle(x,height-25-bar_height,x+24,height-25,fill=color,outline="")
+            canvas.create_text(x+12,height-12,text=str(row["month"])[5:],font=("Segoe UI",7))
 
     def build_invoices(self):
         l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),105),("date",tr(l,"date"),95),("due","Due Date",95),("party",tr(l,"party"),180),("kind","Type",70),("currency",tr(l,"currency"),65),("total",tr(l,"total"),95),("paid","Paid",90),("outstanding","Outstanding",100),("payment","Payment",85),("debit","Debit",95),("credit","Credit",95),("status","Status",80),("attachments","Files",55)])
@@ -214,6 +260,7 @@ class SaberApp(tk.Tk):
         self.action_button(lifecycle,"Attach PDF / Image",self.attach_to_selected_invoice).pack(side="left",padx=4)
         self.action_button(lifecycle,"Attachments",self.show_selected_attachments).pack(side="left",padx=4)
         self.action_button(lifecycle,"History",self.show_invoice_history).pack(side="left",padx=4)
+        self.action_button(lifecycle,"Branded Invoice PDF",self.export_selected_invoice_pdf).pack(side="left",padx=4)
         self.invoice_tree.bind("<Double-1>",lambda _event:self.edit_selected_invoice())
         self.load_invoices()
 
@@ -383,6 +430,17 @@ class SaberApp(tk.Tk):
             tree.heading(key,text=label); tree.column(key,width=width)
         for item in items: tree.insert("","end",values=(item["created_at"][:19],item.get("username") or "",item["action"],item.get("details") or ""))
         tree.pack(fill="both",expand=True,padx=10,pady=10)
+
+    def export_selected_invoice_pdf(self):
+        invoice_id=self.selected_invoice_id()
+        if invoice_id is None: return
+        try: detail=self.client.invoice_detail(invoice_id)
+        except Exception as exc: return messagebox.showerror("Invoice PDF",str(exc))
+        invoice=detail["invoice"]; path=filedialog.asksaveasfilename(defaultextension=".pdf",initialfile=f'Invoice_{invoice["invoice_number"]}.pdf',filetypes=[("PDF document","*.pdf")])
+        if not path: return
+        try: export_invoice_pdf(path,invoice,detail["items"],resource_path("assets/Saber_for_Audit_logo.png"))
+        except Exception as exc: return messagebox.showerror("Invoice PDF",str(exc))
+        messagebox.showinfo("Invoice PDF",f"Saved successfully:\n{path}")
 
     def confirm_invoice_data_saved(self):
         try:
@@ -1026,6 +1084,82 @@ class SaberApp(tk.Tk):
             self.accounts_tree.insert("","end",values=(row["code"],row.get("parent_code") or "",
                 row["name_en"],row.get("name_fr") or "",row.get("name_ar") or "",row["type"]))
 
+    def build_settings(self):
+        nested=ttk.Notebook(self.settings_tab); nested.pack(fill="both",expand=True,padx=10,pady=10)
+        users=tk.Frame(nested,bg=LIGHT); backups=tk.Frame(nested,bg=LIGHT); rates=tk.Frame(nested,bg=LIGHT); general=tk.Frame(nested,bg=LIGHT)
+        nested.add(users,text="Users & Permissions"); nested.add(backups,text="Backup & Restore"); nested.add(rates,text="Exchange Rates"); nested.add(general,text="General Settings")
+        user_controls=tk.Frame(users,bg=LIGHT); user_controls.pack(fill="x",padx=10,pady=10)
+        self.user_name=tk.StringVar(); self.user_password=tk.StringVar(); self.user_role=tk.StringVar(value="viewer"); self.user_language=tk.StringVar(value="en")
+        for label,var,width in (("Username",self.user_name,16),("Password",self.user_password,16)):
+            tk.Label(user_controls,text=label,bg=LIGHT).pack(side="left",padx=(4,2)); tk.Entry(user_controls,textvariable=var,width=width,show="*" if label=="Password" else "").pack(side="left",padx=4)
+        ttk.Combobox(user_controls,textvariable=self.user_role,values=["admin","accountant","viewer"],state="readonly",width=11).pack(side="left",padx=4)
+        ttk.Combobox(user_controls,textvariable=self.user_language,values=["en","ar","fr"],state="readonly",width=6).pack(side="left",padx=4)
+        self.action_button(user_controls,"Add User",self.add_user).pack(side="left",padx=5)
+        self.users_tree=self.table(users,[("id","ID",60),("username","Username",200),("role","Role",120),("language","Language",90),("active","Active",80)])
+        backup_controls=tk.Frame(backups,bg=LIGHT); backup_controls.pack(fill="x",padx=10,pady=10)
+        self.action_button(backup_controls,"Create Backup Now",self.create_backup).pack(side="left",padx=4)
+        tk.Button(backup_controls,text="Restore Selected",command=self.restore_selected_backup,bg="#8B1E1E",fg="white",border=0,padx=15,pady=7).pack(side="left",padx=4)
+        self.backups_tree=self.table(backups,[("name","Backup File",360),("size","Size",120),("modified","Created",180)])
+        rate_controls=tk.Frame(rates,bg=LIGHT); rate_controls.pack(fill="x",padx=10,pady=10)
+        self.rate_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y")); self.rate_from=tk.StringVar(value="USD"); self.rate_to=tk.StringVar(value="LBP"); self.rate_value=tk.StringVar(value="1")
+        tk.Entry(rate_controls,textvariable=self.rate_date,width=13).pack(side="left",padx=4)
+        ttk.Combobox(rate_controls,textvariable=self.rate_from,values=["USD","EUR","LBP","AED"],state="readonly",width=7).pack(side="left",padx=4)
+        tk.Label(rate_controls,text="to",bg=LIGHT).pack(side="left")
+        ttk.Combobox(rate_controls,textvariable=self.rate_to,values=["USD","EUR","LBP","AED"],state="readonly",width=7).pack(side="left",padx=4)
+        tk.Entry(rate_controls,textvariable=self.rate_value,width=14).pack(side="left",padx=4)
+        self.action_button(rate_controls,"Save Rate",self.save_exchange_rate).pack(side="left",padx=5)
+        self.rates_tree=self.table(rates,[("date","Date",110),("from","From",80),("to","To",80),("rate","Rate",150),("created","Saved",180)])
+        self.base_currency=tk.StringVar(value="USD"); self.backup_hours=tk.StringVar(value="24")
+        tk.Label(general,text="Base Currency",bg=LIGHT).grid(row=0,column=0,padx=14,pady=14,sticky="w")
+        ttk.Combobox(general,textvariable=self.base_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=15).grid(row=0,column=1,padx=14,pady=14)
+        tk.Label(general,text="Automatic backup every (hours)",bg=LIGHT).grid(row=1,column=0,padx=14,pady=14,sticky="w")
+        tk.Entry(general,textvariable=self.backup_hours,width=18).grid(row=1,column=1,padx=14,pady=14)
+        self.action_button(general,"Save Settings",self.save_general_settings).grid(row=2,column=0,columnspan=2,pady=14)
+        self.load_settings_pages()
+
+    def load_settings_pages(self):
+        if not hasattr(self,"users_tree"): return
+        try:
+            settings=self.client.settings(); rates=self.client.exchange_rates()
+            self.base_currency.set(settings.get("base_currency","USD")); self.backup_hours.set(settings.get("backup_interval_hours","24"))
+        except Exception as exc: return messagebox.showerror("Settings",str(exc))
+        self.rates_tree.delete(*self.rates_tree.get_children())
+        for row in rates: self.rates_tree.insert("","end",values=(row["rate_date"],row["from_currency"],row["to_currency"],row["rate"],row["created_at"][:19]))
+        try: users=self.client.users(); backups=self.client.backups()
+        except Exception:
+            users=[]; backups=[]
+        self.users_tree.delete(*self.users_tree.get_children()); self.backups_tree.delete(*self.backups_tree.get_children())
+        for row in users: self.users_tree.insert("","end",values=(row["id"],row["username"],row["role"],row["language"],"Yes" if row["active"] else "No"))
+        for row in backups: self.backups_tree.insert("","end",iid=row["name"],values=(row["name"],f'{row["size"]/1024/1024:,.2f} MB',row["modified"][:19]))
+
+    def add_user(self):
+        try: self.client.save_user({"username":self.user_name.get(),"password":self.user_password.get(),"role":self.user_role.get(),"language":self.user_language.get(),"active":True})
+        except Exception as exc: return messagebox.showerror("Users",str(exc))
+        self.user_name.set(""); self.user_password.set(""); self.load_settings_pages(); messagebox.showinfo("Users","User saved successfully")
+
+    def create_backup(self):
+        try: result=self.client.create_backup()
+        except Exception as exc: return messagebox.showerror("Backup",str(exc))
+        self.load_settings_pages(); messagebox.showinfo("Backup",f'Backup created:\n{result["path"]}')
+
+    def restore_selected_backup(self):
+        selected=self.backups_tree.selection()
+        if not selected: return messagebox.showwarning("Restore","Select one backup")
+        if not messagebox.askyesno("Restore Database","Restore this backup? A safety backup of current data will be created first."): return
+        try: self.client.restore_backup(selected[0])
+        except Exception as exc: return messagebox.showerror("Restore",str(exc))
+        messagebox.showinfo("Restore","Database restored successfully. Refreshing all pages."); self.load_dashboard(); self.load_invoices(); self.load_journal(); self.load_trial(); self.load_settings_pages()
+
+    def save_exchange_rate(self):
+        try: self.client.save_exchange_rate({"rate_date":self.rate_date.get(),"from_currency":self.rate_from.get(),"to_currency":self.rate_to.get(),"rate":self.rate_value.get()})
+        except Exception as exc: return messagebox.showerror("Exchange Rates",str(exc))
+        self.load_settings_pages(); messagebox.showinfo("Exchange Rates","Rate saved successfully")
+
+    def save_general_settings(self):
+        try: self.client.save_settings({"base_currency":self.base_currency.get(),"backup_interval_hours":self.backup_hours.get()})
+        except Exception as exc: return messagebox.showerror("Settings",str(exc))
+        messagebox.showinfo("Settings","Settings saved successfully")
+
     def build_trial(self):
         filters=tk.Frame(self.trial_tab,bg=LIGHT); filters.pack(fill="x",padx=10,pady=(10,0))
         tk.Label(filters,text="From Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
@@ -1081,8 +1215,8 @@ class SaberApp(tk.Tk):
 
     def export_report(self,report,format_name):
         if report == "dashboard":
-            title="Saber Accounting - Dashboard"; headers=["Type","Currency","Invoices","Before VAT","VAT","Total","Debit","Credit"]
-            rows=[[r["kind"],r["currency"],r["count"],r["subtotal"],r["vat"],r["total"],r["debit"],r["credit"]] for r in getattr(self,"dashboard_rows",[])]
+            title="Saber Accounting - Dashboard"; headers=["Currency","Sales","Purchases","Expenses","Net Profit","Receivables","Payables","Overdue"]
+            rows=[[r["currency"],r["sales"],r["purchases"],r["expenses"],r["profit"],r["receivables"],r["payables"],r["overdue"]] for r in getattr(self,"dashboard_rows",[])]
         else:
             title="Saber Accounting - Trial Balance"
             if self.trial_from_date.get().strip() or self.trial_to_date.get().strip():
