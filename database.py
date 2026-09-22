@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS parties (
  id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('customer','supplier','both')),
- name TEXT NOT NULL, tax_number TEXT, currency TEXT NOT NULL DEFAULT 'USD', UNIQUE(kind,name)
+ name TEXT NOT NULL, tax_number TEXT, currency TEXT NOT NULL DEFAULT 'USD', account_number TEXT, UNIQUE(kind,name)
 );
 CREATE TABLE IF NOT EXISTS accounts (
  id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name_en TEXT NOT NULL, name_ar TEXT, name_fr TEXT,
@@ -157,6 +157,10 @@ class Database:
             for column, definition in lifecycle_columns.items():
                 if column not in invoice_columns:
                     db.execute(f"ALTER TABLE invoices ADD COLUMN {column} {definition}")
+            party_columns={row["name"] for row in db.execute("PRAGMA table_info(parties)")}
+            if "account_number" not in party_columns:
+                db.execute("ALTER TABLE parties ADD COLUMN account_number TEXT")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_parties_account_number ON parties(account_number) WHERE account_number IS NOT NULL")
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('base_currency','USD')")
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('backup_interval_hours','24')")
@@ -181,6 +185,14 @@ class Database:
                        (DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"],))
             db.execute("UPDATE invoices SET expense_account=? WHERE expense_account='5100'",
                        (DEFAULT_LEBANESE_ACCOUNTS["purchases"],))
+            suppliers=db.execute("SELECT id,name,account_number FROM parties WHERE kind IN ('supplier','both') ORDER BY id").fetchall()
+            for supplier in suppliers:
+                account_number=supplier["account_number"] or f"4011{supplier['id']:05d}"
+                db.execute("UPDATE parties SET account_number=? WHERE id=?",(account_number,supplier["id"]))
+                db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code='4011'))",
+                    (account_number,f"Supplier - {supplier['name']}","liability"))
+                db.execute("UPDATE invoices SET supplier_account=? WHERE party_id=? AND kind='purchase' AND supplier_account='4011'",
+                    (account_number,supplier["id"]))
 
     def login(self, username, password):
         with self.connect() as db:
@@ -225,6 +237,14 @@ class Database:
     def _account_id(self, db, code):
         row = db.execute("SELECT id FROM accounts WHERE code=?", (code,)).fetchone()
         return row["id"]
+
+    def _ensure_party_account(self, db, party):
+        if party["kind"] not in ("supplier","both"): return None
+        account_number=party["account_number"] or f"4011{party['id']:05d}"
+        db.execute("UPDATE parties SET account_number=? WHERE id=?",(account_number,party["id"]))
+        db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code='4011'))",
+            (account_number,f"Supplier - {party['name']}","liability"))
+        return account_number
 
     def _date_year(self, value):
         text = str(value or "").strip()
@@ -326,11 +346,14 @@ class Database:
         with self.connect() as db:
             party_kind = "customer" if item["kind"] == "sale" else "supplier"
             db.execute("INSERT OR IGNORE INTO parties(kind,name,currency) VALUES(?,?,?)", (party_kind, item.get("party_name") or "Unspecified", item.get("currency", "USD")))
-            party = db.execute("SELECT id FROM parties WHERE kind=? AND name=?", (party_kind, item.get("party_name") or "Unspecified")).fetchone()
+            party = db.execute("SELECT * FROM parties WHERE kind=? AND name=?", (party_kind, item.get("party_name") or "Unspecified")).fetchone()
             subtotal = Decimal(str(item.get("subtotal") or 0)); vat = Decimal(str(item.get("vat") or 0)); total = Decimal(str(item.get("total") or subtotal + vat))
             currency_issue = str(item.get("currency_issue") or "")
             status = "posted" if total == subtotal + vat and not currency_issue.startswith(("conflicting:", "unsupported:")) else "review"
             supplier_account = str(item.get("supplier_account") or DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]).strip()
+            party_account=self._ensure_party_account(db,party)
+            if item["kind"]=="purchase" and (not item.get("supplier_account") or supplier_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]):
+                supplier_account=party_account
             vat_account = str(item.get("vat_account") or DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"]).strip()
             expense_account = str(item.get("expense_account") or DEFAULT_LEBANESE_ACCOUNTS["purchases"]).strip()
             account_definitions = [
@@ -465,7 +488,10 @@ class Database:
             party_kind = "customer" if kind == "sale" else "supplier"
             party_name = str(item["party_name"]).strip()
             db.execute("INSERT OR IGNORE INTO parties(kind,name,currency) VALUES(?,?,?)", (party_kind, party_name, currency))
-            party = db.execute("SELECT id FROM parties WHERE kind=? AND name=?", (party_kind, party_name)).fetchone()
+            party = db.execute("SELECT * FROM parties WHERE kind=? AND name=?", (party_kind, party_name)).fetchone()
+            party_account = self._ensure_party_account(db, party)
+            if kind == "purchase" and supplier_account == DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"] and party_account:
+                supplier_account = party_account
             for code, name, account_type in (
                 (supplier_account, "Supplier Account", "liability"),
                 (vat_account, "VAT Account", "asset"),
@@ -708,7 +734,7 @@ class Database:
     def list_parties(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute(
-                "SELECT id,kind,name,tax_number,currency FROM parties ORDER BY name,kind")]
+                "SELECT id,kind,name,tax_number,currency,account_number FROM parties ORDER BY name,kind")]
 
     def save_party(self, item, user_id):
         name=str(item.get("name") or "").strip(); kind=str(item.get("kind") or "").strip().lower()
@@ -720,6 +746,8 @@ class Database:
                 ON CONFLICT(kind,name) DO UPDATE SET tax_number=excluded.tax_number,currency=excluded.currency""",
                 (kind,name,tax_number,currency))
             row=db.execute("SELECT * FROM parties WHERE kind=? AND name=?",(kind,name)).fetchone()
+            account_number=self._ensure_party_account(db,row)
+            if account_number: row=db.execute("SELECT * FROM parties WHERE id=?",(row["id"],)).fetchone()
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"save","party",row["id"],json.dumps({"name":name,"kind":kind}),utcnow()))
             return dict(row)
@@ -738,6 +766,9 @@ class Database:
         with self.connect() as db:
             party=db.execute("SELECT * FROM parties WHERE id=?",(party_id,)).fetchone()
             if not party: raise KeyError(party_id)
+            supplier_account=self._ensure_party_account(db,party)
+            if kind=="supplier_payment" and party_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"] and supplier_account:
+                party_account=supplier_account
             db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(cash_account,"Cash / Bank Account","asset"))
             db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(party_account,"Party Control Account","asset" if kind=="customer_receipt" else "liability"))
             result=db.execute("""INSERT INTO payments(kind,party_id,payment_date,currency,amount,cash_account,party_account,reference,description,created_by,created_at)

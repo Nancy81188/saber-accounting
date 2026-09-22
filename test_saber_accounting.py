@@ -286,7 +286,22 @@ class SaberAccountingTest(unittest.TestCase):
                   "kind":"sale","currency":"USD","subtotal":200,"vat":22,"total":222}
             db.import_invoice(purchase,user["id"]); db.import_invoice(sale,user["id"])
             trial_codes={row["code"] for row in db.trial_balance()}
-            self.assertTrue({"4011","4111","4426.6","4427","6011","713"}.issubset(trial_codes))
+            self.assertTrue({"4111","4426.6","4427","6011","713"}.issubset(trial_codes))
+            self.assertTrue(any(code.startswith("4011") and len(code)==9 for code in trial_codes))
+
+    def test_suppliers_receive_unique_nine_digit_accounts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"suppliers.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            first=db.save_party({"name":"Supplier One","kind":"supplier","currency":"USD"},user["id"])
+            second=db.save_party({"name":"Supplier Two","kind":"supplier","currency":"EUR"},user["id"])
+            self.assertRegex(first["account_number"],r"^\d{9}$")
+            self.assertRegex(second["account_number"],r"^\d{9}$")
+            self.assertNotEqual(first["account_number"],second["account_number"])
+            invoice_id=db.import_invoice({"invoice_number":"AUTO-AC","invoice_date":"22-09-2026",
+                "party_name":"Supplier One","kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111},user["id"])
+            invoice=next(row for row in db.list_invoices() if row["id"]==invoice_id)
+            self.assertEqual(invoice["supplier_account"],first["account_number"])
 
     def test_update_specific_invoice_row(self):
         with tempfile.TemporaryDirectory() as folder:
