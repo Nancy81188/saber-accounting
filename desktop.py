@@ -116,13 +116,14 @@ class SaberApp(tk.Tk):
         notebook=ttk.Notebook(self); self.main_notebook=notebook; notebook.pack(fill="both",expand=True,padx=18,pady=16)
         self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.parties_tab=tk.Frame(notebook,bg=LIGHT); self.transactions_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.reports_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT); self.settings_tab=tk.Frame(notebook,bg=LIGHT)
         notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text=tr(lang,"manual_entry")); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.parties_tab,text=tr(lang,"customers_suppliers")); notebook.add(self.transactions_tab,text=tr(lang,"payments_expenses")); notebook.add(self.journal_tab,text=tr(lang,"general_journal")); notebook.add(self.trial_tab,text=tr(lang,"trial_balance")); notebook.add(self.pnl_tab,text=tr(lang,"profit_loss")); notebook.add(self.reports_tab,text=tr(lang,"financial_reports")); notebook.add(self.statement_tab,text=tr(lang,"statement_account")); notebook.add(self.accounts_tab,text=tr(lang,"chart_accounts")); notebook.add(self.settings_tab,text=tr(lang,"security_backup_rates"))
+        self.main_tab_pages=[self.dashboard_tab,self.invoices_tab,self.manual_tab,self.import_tab,self.parties_tab,self.transactions_tab,self.journal_tab,self.trial_tab,self.pnl_tab,self.reports_tab,self.statement_tab,self.accounts_tab,self.settings_tab]
         self.tab_names=[notebook.tab(tab,"text") for tab in notebook.tabs()]
+        self.visible_tab_start=0
         self.tab_choice=tk.StringVar(value=self.tab_names[0])
-        tk.Button(tab_nav,text="◀ "+tr(lang,"previous_tab"),command=lambda:self.move_main_tab(-1),bg=NAVY,fg="white",border=0,padx=12,pady=5).pack(side="left",padx=3)
-        chooser=ttk.Combobox(tab_nav,textvariable=self.tab_choice,values=self.tab_names,state="readonly",width=32)
-        chooser.pack(side="left",padx=5); chooser.bind("<<ComboboxSelected>>",lambda _event:self.select_named_tab())
-        tk.Button(tab_nav,text=tr(lang,"next_tab")+" ▶",command=lambda:self.move_main_tab(1),bg=NAVY,fg="white",border=0,padx=12,pady=5).pack(side="left",padx=3)
-        tk.Label(tab_nav,text="Use these buttons to reach tabs that do not fit on screen",bg=LIGHT,fg="#5f6b76").pack(side="left",padx=12)
+        tk.Button(tab_nav,text="◀",command=lambda:self.move_main_tab(-1),bg=NAVY,fg="white",border=0,width=3,pady=3).pack(side="left",padx=(3,6))
+        tk.Label(tab_nav,text="6 tabs visible — use arrows to scroll",bg=LIGHT,fg="#5f6b76").pack(side="left")
+        tk.Button(tab_nav,text="▶",command=lambda:self.move_main_tab(1),bg=NAVY,fg="white",border=0,width=3,pady=3).pack(side="left",padx=6)
+        self.show_tab_window(0)
         notebook.bind("<<NotebookTabChanged>>",lambda _event:self.tab_choice.set(notebook.tab(notebook.select(),"text")))
         filter_bar=tk.Frame(self,bg=LIGHT); filter_bar.pack(fill="x",padx=28)
         tk.Label(filter_bar,text="Show currency:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
@@ -138,13 +139,30 @@ class SaberApp(tk.Tk):
         self.after(60000,self.check_auto_logout)
 
     def move_main_tab(self,direction):
-        tabs=self.main_notebook.tabs()
-        if not tabs: return
-        current=self.main_notebook.index("current")
-        target=(current+direction)%len(tabs); self.main_notebook.select(target); self.tab_choice.set(self.main_notebook.tab(target,"text"))
+        try: current_page=self.main_notebook.select(); current=self.main_tab_pages.index(self.nametowidget(current_page))
+        except (ValueError,KeyError): current=self.visible_tab_start
+        target=(current+direction)%len(self.main_tab_pages)
+        start=self.visible_tab_start
+        if target<start: start=target
+        elif target>=start+6: start=target-5
+        if direction>0 and current==len(self.main_tab_pages)-1: start=0
+        elif direction<0 and current==0: start=max(0,len(self.main_tab_pages)-6)
+        self.show_tab_window(start,target)
+
+    def show_tab_window(self,start,selected_index=None):
+        maximum=max(0,len(self.main_tab_pages)-6); self.visible_tab_start=max(0,min(start,maximum))
+        for page in self.main_tab_pages:
+            try: self.main_notebook.forget(page)
+            except tk.TclError: pass
+        end=min(len(self.main_tab_pages),self.visible_tab_start+6)
+        for index in range(self.visible_tab_start,end):
+            self.main_notebook.add(self.main_tab_pages[index],text=self.tab_names[index],padding=(8,4))
+        target=selected_index if selected_index is not None and self.visible_tab_start<=selected_index<end else self.visible_tab_start
+        self.main_notebook.select(self.main_tab_pages[target]); self.tab_choice.set(self.tab_names[target])
 
     def select_named_tab(self):
-        try: self.main_notebook.select(self.tab_names.index(self.tab_choice.get()))
+        try:
+            index=self.tab_names.index(self.tab_choice.get()); self.show_tab_window(max(0,min(index,len(self.main_tab_pages)-6)),index)
         except ValueError: pass
 
     def currency_changed(self):
