@@ -114,7 +114,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             from_date = query.get("from_date", [None])[0]
             to_date = query.get("to_date", [None])[0]
             return self._json(200, {"items": self.db.trial_balance(from_date, to_date,
-                query.get("account",[None])[0],query.get("include_subaccounts",["true"])[0].lower()=="true")})
+                query.get("account",[None])[0],query.get("include_subaccounts",["true"])[0].lower()=="true",
+                query.get("account_from",[None])[0],query.get("account_to",[None])[0])})
         if path == "/api/journal":
             query = parse_qs(parsed.query)
             return self._json(200, {"items": self.db.journal(
@@ -122,6 +123,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 query.get("to_date", [None])[0],
                 query.get("currency", [None])[0],
             )})
+        if path.startswith("/api/journal-vouchers/"):
+            try: return self._json(200,self.db.journal_voucher_detail(int(path.rsplit("/",1)[-1])))
+            except KeyError: return self._json(404,{"error":"Journal Voucher not found"})
         if path == "/api/profit-loss":
             query=parse_qs(parsed.query)
             return self._json(200,{"items":self.db.profit_and_loss(query.get("from_date",[None])[0],query.get("to_date",[None])[0],query.get("currency",[None])[0])})
@@ -203,6 +207,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             try: expense_id=self.db.add_expense(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"expense_id":expense_id})
+        if path == "/api/journal-vouchers":
+            try: result=self.db.save_journal_voucher(body.get("voucher",{}),body.get("lines",[]),user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,result)
         if path.startswith("/api/invoices/") and path.endswith("/items"):
             try:
                 invoice_id = int(path.split("/")[-2])
@@ -277,6 +285,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(423,{"error":"This fiscal year is closed and read-only"})
         if user["role"] == "viewer":
             return self._json(403,{"error":"Viewer access is read-only"})
+        if path.startswith("/api/journal-vouchers/"):
+            try:
+                body=self._body(); result=self.db.save_journal_voucher(body.get("voucher",{}),body.get("lines",[]),user["id"],int(path.rsplit("/",1)[-1]))
+            except KeyError: return self._json(404,{"error":"Journal Voucher not found"})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
         if path.startswith("/api/invoices/"):
             try:
                 invoice_id = int(path.rsplit("/", 1)[-1])

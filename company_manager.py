@@ -19,9 +19,18 @@ class CompanyManager:
         self.root=self.master_path.parent/"companies"; self.root.mkdir(parents=True,exist_ok=True)
         self.registry_path=self.root/"companies.json"; self._cache={}
         if not self.registry_path.exists():
-            year=datetime.now().year
-            self._write({"companies":[{"id":"saber-for-audit","name":"Saber for Audit","active":True,
-                "years":[{"year":year,"database":str(self.master_path),"status":"open"}]}]})
+            self._write({"companies":[{"id":"ecologe-lebanon-sarl","name":"ECOLOGE LEBANON SARL","active":True,
+                "years":[{"year":2024,"database":str(self.master_path),"status":"open"}]}]})
+        else:
+            data=self._read(); companies=data.get("companies",[])
+            if len(companies)==1 and companies[0].get("id")=="saber-for-audit" and companies[0].get("name")=="Saber for Audit":
+                companies[0]["id"]="ecologe-lebanon-sarl"; companies[0]["name"]="ECOLOGE LEBANON SARL"
+                for fiscal in companies[0].get("years",[]): fiscal["year"]=2024
+                self._write(data)
+                try:
+                    with Database(self.master_path).connect() as db:
+                        db.execute("INSERT INTO app_settings(key,value) VALUES('company_name','ECOLOGE LEBANON SARL') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                except Exception: pass
 
     def _read(self):
         try: return json.loads(self.registry_path.read_text(encoding="utf-8"))

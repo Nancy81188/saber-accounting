@@ -227,6 +227,22 @@ class SaberAccountingTest(unittest.TestCase):
             db.delete_journal_voucher(voucher["entry_id"],user["id"])
             self.assertFalse(any(row["id"]==invoice_id for row in db.list_invoices()))
 
+    def test_direct_journal_voucher_new_edit_multiple_lines_and_number(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"voucher.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            saved=db.save_journal_voucher({"entry_date":"22-09-2026","description":"Opening adjustment","currency":"USD"},[
+                {"account_code":"531","description":"Cash","debit":100,"credit":0},
+                {"account_code":"601100000","description":"Expense reversal","debit":50,"credit":0},
+                {"account_code":"4011","description":"Supplier","debit":0,"credit":150}],user["id"])
+            self.assertEqual(saved["voucher"]["entry_number"],"JV-2026-000001"); self.assertEqual(len(saved["lines"]),3)
+            entry_id=saved["voucher"]["id"]
+            edited=db.save_journal_voucher({"entry_number":"JV-CUSTOM-1","entry_date":"22-09-2026","description":"Edited adjustment","currency":"USD"},[
+                {"account_code":"531","debit":200,"credit":0},{"account_code":"4011","debit":0,"credit":200}],user["id"],entry_id)
+            self.assertEqual(edited["voucher"]["entry_number"],"JV-CUSTOM-1"); self.assertEqual(len(edited["lines"]),2)
+            db.delete_journal_voucher(entry_id,user["id"])
+            with self.assertRaises(KeyError): db.journal_voucher_detail(entry_id)
+
     def test_currency_detection_from_excel_number_formats(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "formatted-currencies.xlsx"
@@ -404,6 +420,8 @@ class SaberAccountingTest(unittest.TestCase):
             exact=db.trial_balance("2026-09-10","2026-09-20",account,False)
             self.assertTrue(exact); self.assertTrue(all(r["code"]==account for r in exact))
             self.assertTrue(all("usd_opening" in r and "lbp_closing_balance" in r for r in exact))
+            ranged=db.trial_balance("2026-09-10","2026-09-20",None,True,"4011","601199999")
+            self.assertTrue(ranged); self.assertTrue(all(4011<=int(''.join(c for c in r["code"] if c.isdigit()))<=601199999 for r in ranged))
 
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:

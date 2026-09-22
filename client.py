@@ -56,9 +56,9 @@ class ApiClient:
         return self.request("GET", f"/api/statement?{query}")
     def add_invoice_item(self, invoice_id, item):
         return self.request("POST", f"/api/invoices/{invoice_id}/items", {"item":item})["invoice"]
-    def trial_balance(self, from_date=None, to_date=None, account=None, include_subaccounts=True):
+    def trial_balance(self, from_date=None, to_date=None, account=None, include_subaccounts=True, account_from=None, account_to=None):
         query = urlencode({key: value for key, value in {
-            "from_date": from_date, "to_date": to_date,"account":account,"include_subaccounts":"true" if include_subaccounts else "false"
+            "from_date": from_date, "to_date": to_date,"account":account,"include_subaccounts":"true" if include_subaccounts else "false","account_from":account_from,"account_to":account_to
         }.items() if value})
         path = "/api/trial-balance" + (f"?{query}" if query else "")
         return self.request("GET", path)["items"]
@@ -73,6 +73,8 @@ class ApiClient:
     def update_invoice(self, invoice_id, invoice): return self.request("PUT", f"/api/invoices/{invoice_id}", {"invoice": invoice})
     def delete_invoice(self,invoice_id): return self.request("DELETE",f"/api/invoices/{invoice_id}")
     def delete_journal_voucher(self,entry_id): return self.request("DELETE",f"/api/journal/{entry_id}")
+    def journal_voucher(self,entry_id): return self.request("GET",f"/api/journal-vouchers/{entry_id}")
+    def save_journal_voucher(self,voucher,lines,entry_id=None): return self.request("PUT" if entry_id else "POST",f"/api/journal-vouchers/{entry_id}" if entry_id else "/api/journal-vouchers",{"voucher":voucher,"lines":lines})
     def invoice_detail(self, invoice_id): return self.request("GET",f"/api/invoices/{invoice_id}/detail")
     def cancel_invoice(self, invoice_id, reason): return self.request("POST",f"/api/invoices/{invoice_id}/cancel",{"reason":reason})["invoice"]
     def duplicate_invoice(self, invoice_id): return self.request("POST",f"/api/invoices/{invoice_id}/duplicate",{})["invoice"]

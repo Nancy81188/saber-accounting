@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS invoices (
  supplier_side TEXT NOT NULL DEFAULT 'C', vat_side TEXT NOT NULL DEFAULT 'D', expense_side TEXT NOT NULL DEFAULT 'D',
  expense_no_vat_account TEXT NOT NULL DEFAULT '601100001', expense_no_vat_side TEXT NOT NULL DEFAULT 'D',
  source_file TEXT, source_row INTEGER, due_date TEXT, payment_status TEXT NOT NULL DEFAULT 'unpaid',
- amount_paid TEXT NOT NULL DEFAULT '0', cancelled_at TEXT, cancellation_reason TEXT,
+ amount_paid TEXT NOT NULL DEFAULT '0', payment_method TEXT, cancelled_at TEXT, cancellation_reason TEXT,
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS invoice_items (
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS journal_entries (
 );
 CREATE TABLE IF NOT EXISTS journal_lines (
  id INTEGER PRIMARY KEY, entry_id INTEGER NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
- account_id INTEGER NOT NULL REFERENCES accounts(id), party_id INTEGER REFERENCES parties(id), debit TEXT NOT NULL DEFAULT '0', credit TEXT NOT NULL DEFAULT '0'
+ account_id INTEGER NOT NULL REFERENCES accounts(id), party_id INTEGER REFERENCES parties(id), description TEXT, debit TEXT NOT NULL DEFAULT '0', credit TEXT NOT NULL DEFAULT '0'
 );
 CREATE TABLE IF NOT EXISTS inventory_items (
  id INTEGER PRIMARY KEY, sku TEXT NOT NULL UNIQUE, name TEXT NOT NULL, unit TEXT NOT NULL DEFAULT 'unit', quantity TEXT NOT NULL DEFAULT '0', average_cost TEXT NOT NULL DEFAULT '0'
@@ -165,6 +165,7 @@ class Database:
                 "due_date": "TEXT",
                 "payment_status": "TEXT NOT NULL DEFAULT 'unpaid'",
                 "amount_paid": "TEXT NOT NULL DEFAULT '0'",
+                "payment_method": "TEXT",
                 "cancelled_at": "TEXT",
                 "cancellation_reason": "TEXT",
                 "entry_type": "TEXT NOT NULL DEFAULT 'purchase'",
@@ -184,6 +185,8 @@ class Database:
             item_columns={row["name"] for row in db.execute("PRAGMA table_info(invoice_items)")}
             for column in ("deductible_subtotal","non_deductible_subtotal"):
                 if column not in item_columns: db.execute(f"ALTER TABLE invoice_items ADD COLUMN {column} TEXT NOT NULL DEFAULT '0'")
+            journal_line_columns={row["name"] for row in db.execute("PRAGMA table_info(journal_lines)")}
+            if "description" not in journal_line_columns: db.execute("ALTER TABLE journal_lines ADD COLUMN description TEXT")
             db.execute("UPDATE invoices SET deductible_subtotal=subtotal WHERE CAST(deductible_subtotal AS REAL)=0 AND CAST(non_deductible_subtotal AS REAL)=0 AND CAST(subtotal AS REAL)<>0")
             db.execute("UPDATE invoice_items SET deductible_subtotal=subtotal WHERE CAST(deductible_subtotal AS REAL)=0 AND CAST(non_deductible_subtotal AS REAL)=0 AND CAST(subtotal AS REAL)<>0")
             expense_columns={row["name"] for row in db.execute("PRAGMA table_info(expenses)")}
@@ -450,6 +453,7 @@ class Database:
                 supplier_side,vat_side,expense_side,expense_no_vat_account,expense_no_vat_side,
                 item.get("source_file"), item.get("source_row"), due_date, payment_status, str(amount_paid), user_id, utcnow()))
             invoice_id = cur.lastrowid
+            db.execute("UPDATE invoices SET payment_method=? WHERE id=?",(str(item.get("payment_method") or "").strip() or None,invoice_id))
             entry_number = f"INV-{invoice_id}"
             entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (entry_number, item.get("invoice_date"), f"{entry_type.replace('_',' ').title()} {item['invoice_number']}", "invoice", invoice_id, item.get("currency", "USD"), user_id, utcnow()))
@@ -561,6 +565,48 @@ class Database:
                 (user_id,"delete","journal_voucher",int(entry_id),json.dumps(details),utcnow()))
         return {"deleted":int(entry_id)}
 
+    def save_journal_voucher(self,item,lines,user_id,entry_id=None):
+        date=str(item.get("entry_date") or "").strip(); self._assert_period_open(date)
+        description=str(item.get("description") or "").strip(); currency=str(item.get("currency") or "USD").upper()
+        if not date or not description or currency not in ("USD","EUR","LBP","AED"): raise ValueError("Enter voucher date, description, and currency")
+        if not isinstance(lines,list) or len(lines)<2: raise ValueError("Journal Voucher requires at least two lines")
+        normalized=[]; total_debit=Decimal("0"); total_credit=Decimal("0")
+        for index,line in enumerate(lines,1):
+            code=str(line.get("account_code") or "").split(" - ",1)[0].strip(); debit=Decimal(str(line.get("debit") or 0)); credit=Decimal(str(line.get("credit") or 0))
+            if not code or min(debit,credit)<0 or (debit>0 and credit>0) or (debit==0 and credit==0): raise ValueError(f"Line {index}: choose an account and enter either Debit or Credit")
+            normalized.append((code,str(line.get("description") or "").strip(),debit,credit)); total_debit+=debit; total_credit+=credit
+        if abs(total_debit-total_credit)>=Decimal("0.005"): raise ValueError(f"Journal Voucher is unbalanced. Debit {total_debit}; Credit {total_credit}; Remaining {abs(total_debit-total_credit)}")
+        with self.connect() as db:
+            if entry_id:
+                existing=db.execute("SELECT * FROM journal_entries WHERE id=? AND source_type='journal_voucher'",(int(entry_id),)).fetchone()
+                if not existing: raise KeyError(entry_id)
+                self._assert_period_open(existing["entry_date"]); voucher_number=str(item.get("entry_number") or existing["entry_number"]).strip()
+                duplicate=db.execute("SELECT 1 FROM journal_entries WHERE entry_number=? AND id<>?",(voucher_number,int(entry_id))).fetchone()
+                if duplicate: raise ValueError("Voucher number already exists")
+                db.execute("UPDATE journal_entries SET entry_number=?,entry_date=?,description=?,currency=? WHERE id=?",(voucher_number,date,description,currency,int(entry_id)))
+                db.execute("DELETE FROM journal_lines WHERE entry_id=?",(int(entry_id),)); saved_id=int(entry_id); action="update"
+            else:
+                voucher_number=str(item.get("entry_number") or "").strip()
+                if not voucher_number:
+                    year=self._date_year(date); prefix=f"JV-{year}-"; row=db.execute("SELECT entry_number FROM journal_entries WHERE entry_number LIKE ? ORDER BY entry_number DESC LIMIT 1",(prefix+"%",)).fetchone()
+                    sequence=int(row["entry_number"].rsplit("-",1)[-1])+1 if row else 1; voucher_number=f"{prefix}{sequence:06d}"
+                if db.execute("SELECT 1 FROM journal_entries WHERE entry_number=?",(voucher_number,)).fetchone(): raise ValueError("Voucher number already exists")
+                saved_id=db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?)",(voucher_number,date,description,"journal_voucher",currency,user_id,utcnow())).lastrowid; action="create"
+            for code,line_description,debit,credit in normalized:
+                account=db.execute("SELECT id FROM accounts WHERE code=?",(code,)).fetchone()
+                if not account: raise ValueError(f"Account {code} was not found")
+                db.execute("INSERT INTO journal_lines(entry_id,account_id,description,debit,credit) VALUES(?,?,?,?,?)",(saved_id,account["id"],line_description,str(debit),str(credit)))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",(user_id,action,"journal_voucher",saved_id,json.dumps({"entry_number":voucher_number,"debit":str(total_debit),"credit":str(total_credit)}),utcnow()))
+        return self.journal_voucher_detail(saved_id)
+
+    def journal_voucher_detail(self,entry_id):
+        with self.connect() as db:
+            entry=db.execute("SELECT * FROM journal_entries WHERE id=? AND source_type='journal_voucher'",(int(entry_id),)).fetchone()
+            if not entry: raise KeyError(entry_id)
+            lines=[dict(row) for row in db.execute("""SELECT a.code account_code,a.name_en account_name,COALESCE(j.description,'') description,
+                CAST(j.debit AS REAL) debit,CAST(j.credit AS REAL) credit FROM journal_lines j JOIN accounts a ON a.id=j.account_id WHERE j.entry_id=? ORDER BY j.id""",(int(entry_id),))]
+        return {"voucher":dict(entry),"lines":lines}
+
     def update_invoice(self, invoice_id, item, user_id):
         required = ("invoice_number", "invoice_date", "party_name", "kind", "currency")
         missing = [field for field in required if not str(item.get(field) or "").strip()]
@@ -620,10 +666,10 @@ class Database:
                 db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)", (code, name, account_type))
             db.execute("""UPDATE invoices SET invoice_number=?,kind=?,invoice_date=?,party_id=?,currency=?,
                 subtotal=?,deductible_subtotal=?,non_deductible_subtotal=?,vat=?,total=?,status=?,supplier_account=?,vat_account=?,expense_account=?,entry_type=?,
-                debit_override=?,credit_override=?,supplier_side=?,vat_side=?,expense_side=?,expense_no_vat_account=?,expense_no_vat_side=?,due_date=?,payment_status=?,amount_paid=? WHERE id=?""",
+                debit_override=?,credit_override=?,supplier_side=?,vat_side=?,expense_side=?,expense_no_vat_account=?,expense_no_vat_side=?,due_date=?,payment_status=?,amount_paid=?,payment_method=? WHERE id=?""",
                 (str(item["invoice_number"]).strip(), kind, str(item["invoice_date"]).strip(), party["id"], currency,
                  str(subtotal),str(deductible),str(non_deductible),str(vat), str(total), status, supplier_account, vat_account, expense_account,
-                 entry_type,str(debit_override),str(credit_override),supplier_side,vat_side,expense_side,expense_no_vat_account,expense_no_vat_side,due_date, payment_status, str(amount_paid), invoice_id))
+                 entry_type,str(debit_override),str(credit_override),supplier_side,vat_side,expense_side,expense_no_vat_account,expense_no_vat_side,due_date, payment_status, str(amount_paid),str(item.get("payment_method") or "").strip() or None, invoice_id))
             entry = db.execute("SELECT id FROM journal_entries WHERE source_type IN ('invoice','journal_voucher') AND source_id=?", (invoice_id,)).fetchone()
             description = f"{entry_type.replace('_',' ').title()} {str(item['invoice_number']).strip()}"
             if entry:
@@ -690,7 +736,7 @@ class Database:
             "supplier_account": invoice["supplier_account"], "vat_account": invoice["vat_account"],
             "expense_account": invoice["expense_account"], "status": "posted",
             "expense_no_vat_account":invoice.get("expense_no_vat_account",EXPENSE_NO_VAT_ACCOUNT_9),
-            "supplier_side":invoice.get("supplier_side","C"),"vat_side":invoice.get("vat_side","D"),"expense_side":invoice.get("expense_side","D"),"expense_no_vat_side":invoice.get("expense_no_vat_side","D"),
+            "supplier_side":invoice.get("supplier_side","C"),"vat_side":invoice.get("vat_side","D"),"expense_side":invoice.get("expense_side","D"),"expense_no_vat_side":invoice.get("expense_no_vat_side","D"),"payment_method":invoice.get("payment_method",""),
             "due_date": invoice.get("due_date"), "amount_paid": invoice.get("amount_paid", 0),"debit":invoice.get("debit",0),"credit":invoice.get("credit",0),
         }
         updated = self.update_invoice(invoice_id, updated_values, user_id)
@@ -739,7 +785,7 @@ class Database:
             items = [dict(item) for item in db.execute("SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY id", (invoice_id,))]
         new_number = self.next_invoice_number(source["kind"], source["invoice_date"])
         payload = {key:source.get(key) for key in ("invoice_date","party_name","kind","entry_type","currency","exchange_rate",
-            "subtotal","vat","total","supplier_account","vat_account","expense_account","expense_no_vat_account","supplier_side","vat_side","expense_side","expense_no_vat_side","due_date")}
+            "subtotal","vat","total","supplier_account","vat_account","expense_account","expense_no_vat_account","supplier_side","vat_side","expense_side","expense_no_vat_side","due_date","payment_method")}
         payload.update({"debit":source.get("debit_override"),"credit":source.get("credit_override")})
         payload.update({"invoice_number":new_number,"amount_paid":0,"source_file":"Duplicated invoice","source_row":None})
         new_id = self.import_invoice(payload, user_id)
@@ -871,10 +917,18 @@ class Database:
         if not name or kind not in ("customer","supplier","both") or currency not in ("USD","EUR","LBP","AED"):
             raise ValueError("Enter a valid name, type, and currency")
         with self.connect() as db:
-            db.execute("""INSERT INTO parties(kind,name,tax_number,mof_number,address,contact_number,currency) VALUES(?,?,?,?,?,?,?)
-                ON CONFLICT(kind,name) DO UPDATE SET tax_number=excluded.tax_number,mof_number=excluded.mof_number,address=excluded.address,contact_number=excluded.contact_number,currency=excluded.currency""",
-                (kind,name,tax_number,mof_number,address,contact_number,currency))
-            row=db.execute("SELECT * FROM parties WHERE kind=? AND name=?",(kind,name)).fetchone()
+            party_id=item.get("id")
+            if party_id:
+                if not db.execute("SELECT 1 FROM parties WHERE id=?",(int(party_id),)).fetchone(): raise KeyError(party_id)
+                duplicate=db.execute("SELECT 1 FROM parties WHERE kind=? AND name=? AND id<>?",(kind,name,int(party_id))).fetchone()
+                if duplicate: raise ValueError("A customer/supplier with this name and type already exists")
+                db.execute("UPDATE parties SET kind=?,name=?,tax_number=?,mof_number=?,address=?,contact_number=?,currency=? WHERE id=?",(kind,name,tax_number,mof_number,address,contact_number,currency,int(party_id)))
+                row=db.execute("SELECT * FROM parties WHERE id=?",(int(party_id),)).fetchone()
+            else:
+                db.execute("""INSERT INTO parties(kind,name,tax_number,mof_number,address,contact_number,currency) VALUES(?,?,?,?,?,?,?)
+                    ON CONFLICT(kind,name) DO UPDATE SET tax_number=excluded.tax_number,mof_number=excluded.mof_number,address=excluded.address,contact_number=excluded.contact_number,currency=excluded.currency""",
+                    (kind,name,tax_number,mof_number,address,contact_number,currency))
+                row=db.execute("SELECT * FROM parties WHERE kind=? AND name=?",(kind,name)).fetchone()
             account_number=self._ensure_party_account(db,row)
             if account_number: row=db.execute("SELECT * FROM parties WHERE id=?",(row["id"],)).fetchone()
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
@@ -1158,7 +1212,7 @@ class Database:
                 COALESCE(CAST(i.credit_override AS REAL),CASE WHEN i.kind='purchase' THEN CAST(i.total AS REAL) ELSE 0 END) credit,
                 i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.expense_no_vat_account,
                 i.supplier_side,i.vat_side,i.expense_side,i.expense_no_vat_side,i.source_row,
-                i.due_date,i.payment_status,CAST(i.amount_paid AS REAL) amount_paid,
+                i.due_date,i.payment_status,CAST(i.amount_paid AS REAL) amount_paid,i.payment_method,
                 CAST(i.total AS REAL)-CAST(i.amount_paid AS REAL) outstanding,i.cancelled_at,i.cancellation_reason,
                 (SELECT COUNT(*) FROM invoice_attachments x WHERE x.invoice_id=i.id) attachment_count
                 FROM invoices i LEFT JOIN parties p ON p.id=i.party_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
@@ -1249,7 +1303,7 @@ class Database:
             row.pop("line_id", None)
         return rows
 
-    def trial_balance(self, from_date=None, to_date=None, account_code=None, include_subaccounts=True):
+    def trial_balance(self, from_date=None, to_date=None, account_code=None, include_subaccounts=True, account_from=None, account_to=None):
         conditions = []
         parameters = []
         normalized_date = """CASE
@@ -1262,6 +1316,10 @@ class Database:
         if account_code:
             conditions.append("a.code LIKE ?" if include_subaccounts else "a.code=?")
             parameters.append(str(account_code)+"%" if include_subaccounts else str(account_code))
+        if account_from:
+            conditions.append("CAST(REPLACE(a.code,'.','') AS INTEGER)>=?"); parameters.append(int(''.join(c for c in str(account_from) if c.isdigit())))
+        if account_to:
+            conditions.append("CAST(REPLACE(a.code,'.','') AS INTEGER)<=?"); parameters.append(int(''.join(c for c in str(account_to) if c.isdigit())))
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as db:
             raw=[dict(r) for r in db.execute(f"""SELECT a.code,a.name_en,e.currency,e.entry_date,
