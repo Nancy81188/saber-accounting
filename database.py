@@ -89,7 +89,8 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE TABLE IF NOT EXISTS expenses (
  id INTEGER PRIMARY KEY, expense_date TEXT NOT NULL, description TEXT NOT NULL, category TEXT,
  currency TEXT NOT NULL, subtotal TEXT NOT NULL, vat TEXT NOT NULL, total TEXT NOT NULL,
- expense_account TEXT NOT NULL, vat_account TEXT NOT NULL, payment_account TEXT NOT NULL,
+ with_vat_subtotal TEXT NOT NULL DEFAULT '0', without_vat_subtotal TEXT NOT NULL DEFAULT '0',
+ expense_account TEXT NOT NULL, expense_without_vat_account TEXT NOT NULL DEFAULT '601100001', vat_account TEXT NOT NULL, payment_account TEXT NOT NULL,
  reference TEXT, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS exchange_rates (
@@ -140,7 +141,7 @@ class Database:
         finally:
             connection.close()
 
-    def initialize(self, admin_password="ChangeMe123!"):
+    def initialize(self, admin_password):
         with self.connect() as db:
             db.executescript(SCHEMA)
             invoice_columns = {row["name"] for row in db.execute("PRAGMA table_info(invoices)")}
@@ -181,6 +182,10 @@ class Database:
                 if column not in item_columns: db.execute(f"ALTER TABLE invoice_items ADD COLUMN {column} TEXT NOT NULL DEFAULT '0'")
             db.execute("UPDATE invoices SET deductible_subtotal=subtotal WHERE CAST(deductible_subtotal AS REAL)=0 AND CAST(non_deductible_subtotal AS REAL)=0 AND CAST(subtotal AS REAL)<>0")
             db.execute("UPDATE invoice_items SET deductible_subtotal=subtotal WHERE CAST(deductible_subtotal AS REAL)=0 AND CAST(non_deductible_subtotal AS REAL)=0 AND CAST(subtotal AS REAL)<>0")
+            expense_columns={row["name"] for row in db.execute("PRAGMA table_info(expenses)")}
+            for column,definition in (("with_vat_subtotal","TEXT NOT NULL DEFAULT '0'"),("without_vat_subtotal","TEXT NOT NULL DEFAULT '0'"),("expense_without_vat_account","TEXT NOT NULL DEFAULT '601100001'")):
+                if column not in expense_columns: db.execute(f"ALTER TABLE expenses ADD COLUMN {column} {definition}")
+            db.execute("UPDATE expenses SET with_vat_subtotal=subtotal WHERE CAST(with_vat_subtotal AS REAL)=0 AND CAST(without_vat_subtotal AS REAL)=0 AND CAST(subtotal AS REAL)<>0")
             party_columns={row["name"] for row in db.execute("PRAGMA table_info(parties)")}
             if "account_number" not in party_columns:
                 db.execute("ALTER TABLE parties ADD COLUMN account_number TEXT")
@@ -873,19 +878,21 @@ class Database:
         date=str(item.get("expense_date") or "").strip(); self._assert_period_open(date)
         description=str(item.get("description") or "").strip()
         if not description: raise ValueError("Expense description is required")
-        subtotal=Decimal(str(item.get("subtotal") or 0)); vat=Decimal(str(item.get("vat") or 0)); total=subtotal+vat
-        if subtotal<0 or vat<0 or total<=0: raise ValueError("Expense amounts must be valid")
+        legacy=Decimal(str(item.get("subtotal") or 0)); with_vat=Decimal(str(item.get("with_vat_subtotal") if item.get("with_vat_subtotal") not in (None,"") else legacy)); without_vat=Decimal(str(item.get("without_vat_subtotal") or 0)); subtotal=with_vat+without_vat
+        vat=Decimal(str(item.get("vat") or 0)); total=subtotal+vat
+        if min(with_vat,without_vat,vat)<0 or total<=0: raise ValueError("Expense amounts must be valid")
         currency=str(item.get("currency") or "USD").upper(); expense_account=str(item.get("expense_account") or EXPENSE_ACCOUNT_9).strip()
+        expense_without_vat_account=str(item.get("expense_without_vat_account") or EXPENSE_NO_VAT_ACCOUNT_9).strip()
         vat_account=str(item.get("vat_account") or VAT_ACCOUNT_9).strip(); payment_account=str(item.get("payment_account") or "531").strip()
         with self.connect() as db:
-            for code,name,typ in ((expense_account,"Expense Account","expense"),(vat_account,"VAT Receivable","asset"),(payment_account,"Cash / Bank Account","asset")):
+            for code,name,typ in ((expense_account,"Expense with VAT","expense"),(expense_without_vat_account,"Expense without VAT","expense"),(vat_account,"VAT Receivable","asset"),(payment_account,"Cash / Bank Account","asset")):
                 db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(code,name,typ))
-            result=db.execute("""INSERT INTO expenses(expense_date,description,category,currency,subtotal,vat,total,expense_account,vat_account,payment_account,reference,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(date,description,str(item.get("category") or "").strip(),currency,str(subtotal),str(vat),str(total),expense_account,vat_account,payment_account,str(item.get("reference") or "").strip(),user_id,utcnow()))
+            result=db.execute("""INSERT INTO expenses(expense_date,description,category,currency,subtotal,with_vat_subtotal,without_vat_subtotal,vat,total,expense_account,expense_without_vat_account,vat_account,payment_account,reference,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(date,description,str(item.get("category") or "").strip(),currency,str(subtotal),str(with_vat),str(without_vat),str(vat),str(total),expense_account,expense_without_vat_account,vat_account,payment_account,str(item.get("reference") or "").strip(),user_id,utcnow()))
             expense_id=result.lastrowid
             entry=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
                 VALUES(?,?,?,?,?,?,?,?)""",(f"EXP-{expense_id}",date,description,"expense",expense_id,currency,user_id,utcnow()))
-            for code,debit,credit in ((expense_account,subtotal,0),(vat_account,vat,0),(payment_account,0,total)):
+            for code,debit,credit in ((expense_account,with_vat,0),(expense_without_vat_account,without_vat,0),(vat_account,vat,0),(payment_account,0,total)):
                 if Decimal(str(debit or credit)):
                     db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",(entry.lastrowid,self._account_id(db,code),str(debit),str(credit)))
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
@@ -895,20 +902,32 @@ class Database:
     def list_expenses(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute("""SELECT id,expense_date,description,category,currency,
-                CAST(subtotal AS REAL) subtotal,CAST(vat AS REAL) vat,CAST(total AS REAL) total,
-                expense_account,vat_account,payment_account,reference FROM expenses ORDER BY id DESC""")]
+                CAST(subtotal AS REAL) subtotal,CAST(with_vat_subtotal AS REAL) with_vat_subtotal,CAST(without_vat_subtotal AS REAL) without_vat_subtotal,CAST(vat AS REAL) vat,CAST(total AS REAL) total,
+                expense_account,expense_without_vat_account,vat_account,payment_account,reference FROM expenses ORDER BY id DESC""")]
 
     def save_exchange_rate(self, item, user_id):
-        date=str(item.get("rate_date") or "").strip(); self._date_year(date)
+        date_from=str(item.get("date_from") or item.get("rate_date") or "").strip(); date_to=str(item.get("date_to") or date_from).strip()
+        self._date_year(date_from); self._date_year(date_to)
+        def parsed(value):
+            for pattern in ("%d-%m-%Y","%Y-%m-%d"):
+                try: return datetime.strptime(value,pattern).date()
+                except ValueError: pass
+            raise ValueError("Date must use DD-MM-YYYY")
+        start=parsed(date_from); end=parsed(date_to)
+        if end<start: raise ValueError("Date To cannot be before Date From")
+        if (end-start).days>3660: raise ValueError("Exchange-rate period cannot exceed 10 years")
         source=str(item.get("from_currency") or "").upper(); target=str(item.get("to_currency") or "").upper()
         rate=Decimal(str(item.get("rate") or 0))
         if source not in ("USD","EUR","LBP","AED") or target not in ("USD","EUR","LBP","AED") or source==target or rate<=0:
             raise ValueError("Enter two different currencies and a positive rate")
         with self.connect() as db:
-            db.execute("""INSERT INTO exchange_rates(rate_date,from_currency,to_currency,rate,created_by,created_at)
+            rows=[]; current=start
+            while current<=end:
+                rows.append((current.strftime("%d-%m-%Y"),source,target,str(rate),user_id,utcnow())); current+=timedelta(days=1)
+            db.executemany("""INSERT INTO exchange_rates(rate_date,from_currency,to_currency,rate,created_by,created_at)
                 VALUES(?,?,?,?,?,?) ON CONFLICT(rate_date,from_currency,to_currency) DO UPDATE SET rate=excluded.rate,
-                created_by=excluded.created_by,created_at=excluded.created_at""",(date,source,target,str(rate),user_id,utcnow()))
-        return True
+                created_by=excluded.created_by,created_at=excluded.created_at""",rows)
+        return {"date_from":date_from,"date_to":date_to,"days":len(rows)}
 
     def list_exchange_rates(self):
         loaded=self.settings().get("exchange_history_loaded_through","")
@@ -1080,6 +1099,17 @@ class Database:
             db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",
                 (user_id,"save","account",json.dumps({"code":code,"name":name}),utcnow()))
         return {"code":code,"name_en":name,"type":account_type,"parent_code":parent}
+
+    def rename_account(self,code,name,user_id):
+        code=str(code or "").strip(); name=str(name or "").strip()
+        if not name: raise ValueError("Account name is required")
+        with self.connect() as db:
+            row=db.execute("SELECT code FROM accounts WHERE code=?",(code,)).fetchone()
+            if not row: raise KeyError(code)
+            db.execute("UPDATE accounts SET name_en=? WHERE code=?",(name,code))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",
+                (user_id,"rename","account",json.dumps({"code":code,"name":name}),utcnow()))
+        return {"code":code,"name_en":name}
 
     def dashboard(self):
         with self.connect() as db:

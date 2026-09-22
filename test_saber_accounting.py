@@ -191,6 +191,8 @@ class SaberAccountingTest(unittest.TestCase):
             db.save_exchange_rate({"rate_date":"22-09-2026","from_currency":"USD","to_currency":"LBP","rate":"89500"},admin["id"])
             rates=db.list_exchange_rates(); fixed=next(row for row in rates if row["from_currency"]=="USD" and row["to_currency"]=="LBP")
             self.assertEqual(fixed["rate"],89500.0)
+            result=db.save_exchange_rate({"date_from":"01-01-2025","date_to":"03-01-2025","from_currency":"EUR","to_currency":"USD","rate":"1.04"},admin["id"])
+            self.assertEqual(result["days"],3)
             backup=db.backup(); self.assertTrue(Path(backup).exists()); self.assertTrue(db.list_backups())
             invoice_id=db.create_manual_invoice({"invoice_number":"","invoice_date":"22-09-2026","party_name":"Client","kind":"sale","currency":"USD","due_date":"01-09-2026"},
                 [{"description":"Audit service","quantity":1,"unit_price":100,"vat_rate":11}],admin["id"])
@@ -340,6 +342,23 @@ class SaberAccountingTest(unittest.TestCase):
             journal=db.journal(currency="USD")
             by_account={row["account_code"]:row for row in journal}
             self.assertEqual(by_account["601100000"]["debit"],80); self.assertEqual(by_account["601100001"]["debit"],20)
+
+    def test_account_name_edit_and_split_expense(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"expense_split.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            created=db.save_account({"code":"","name_en":"Original name","type":"expense","parent_code":"6011"},user["id"])
+            db.rename_account(created["code"],"Updated expense name",user["id"])
+            account=next(row for row in db.list_accounts() if row["code"]==created["code"])
+            self.assertEqual(account["name_en"],"Updated expense name")
+            expense_id=db.add_expense({"expense_date":"22-09-2026","description":"Mixed office expense","category":"Office","currency":"EUR",
+                "with_vat_subtotal":80,"without_vat_subtotal":20,"vat":8.8,"expense_account":"601100000","expense_without_vat_account":"601100001",
+                "vat_account":"442660000","payment_account":"531"},user["id"])
+            saved=next(row for row in db.list_expenses() if row["id"]==expense_id)
+            self.assertEqual(saved["with_vat_subtotal"],80); self.assertEqual(saved["without_vat_subtotal"],20); self.assertEqual(saved["total"],108.8)
+            journal=[row for row in db.journal(currency="EUR") if row["source_type"]=="expense"]
+            debits={row["account_code"]:row["debit"] for row in journal}
+            self.assertEqual(debits["601100000"],80); self.assertEqual(debits["601100001"],20); self.assertEqual(debits["442660000"],8.8)
 
     def test_update_specific_invoice_row(self):
         with tempfile.TemporaryDirectory() as folder:

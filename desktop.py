@@ -831,7 +831,7 @@ class SaberApp(tk.Tk):
         payment_frame=tk.Frame(nested,bg=LIGHT); expense_frame=tk.Frame(nested,bg=LIGHT)
         nested.add(payment_frame,text="Receipts & Payments"); nested.add(expense_frame,text="Expenses")
         self.payments_tree=self.table(payment_frame,[("date","Date",100),("kind","Type",130),("party","Customer / Supplier",220),("currency","Currency",80),("amount","Amount",120),("cash","Cash / Bank A/C",110),("reference","Reference",130),("description","Description",220)])
-        self.expenses_tree=self.table(expense_frame,[("date","Date",100),("description","Description",230),("category","Category",130),("currency","Currency",75),("subtotal","Before VAT",110),("vat","VAT",90),("total","Total",110),("account","Expense A/C",100),("payment","Payment A/C",100)])
+        self.expenses_tree=self.table(expense_frame,[("date","Date",95),("description","Description",190),("category","Category",110),("currency","Currency",70),("with_vat","Expense with VAT",120),("without_vat","Expense without VAT",130),("vat","VAT",80),("total","Total",100),("account","With VAT A/C",100),("no_vat_account","Without VAT A/C",110),("payment","Payment A/C",95)])
         self.load_transactions()
 
     def payment_dialog(self,kind):
@@ -857,25 +857,39 @@ class SaberApp(tk.Tk):
 
     def expense_dialog(self):
         window=tk.Toplevel(self); window.title("Add Expense"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
-        defaults={"expense_date":datetime.now().strftime("%d-%m-%Y"),"description":"","category":"General","currency":"USD","subtotal":"0","vat":"0","expense_account":"601100000","vat_account":"442660000","payment_account":"531","reference":""}
+        defaults={"expense_date":datetime.now().strftime("%d-%m-%Y"),"description":"","category":"General","currency":"USD","with_vat_subtotal":"0","without_vat_subtotal":"0","vat":"0","expense_account":"601100000","expense_without_vat_account":"601100001","vat_account":"442660000","payment_account":"531","reference":""}
         values={key:tk.StringVar(value=value) for key,value in defaults.items()}
-        labels=[("Date","expense_date"),("Description","description"),("Category","category"),("Currency","currency"),("Before VAT","subtotal"),("VAT","vat"),("Expense Account (D - Debit)","expense_account"),("VAT Account (D - Debit)","vat_account"),("Cash / Bank Account (C - Credit)","payment_account"),("Reference","reference")]
+        labels=[("Date","expense_date"),("Description","description"),("Category","category"),("Currency","currency"),("Expense with VAT","with_vat_subtotal"),("Expense without VAT","without_vat_subtotal"),("VAT","vat"),("With VAT Account (D)","expense_account"),("Without VAT Account (D)","expense_without_vat_account"),("VAT Account (D)","vat_account"),("Cash / Bank Account (C)","payment_account"),("Reference","reference")]
         for index,(label,key) in enumerate(labels):
             tk.Label(window,text=label,bg=LIGHT).grid(row=index,column=0,sticky="w",padx=14,pady=5)
             widget=ttk.Combobox(window,textvariable=values[key],values=["USD","EUR","LBP","AED"],state="readonly",width=31) if key=="currency" else tk.Entry(window,textvariable=values[key],width=34)
             widget.grid(row=index,column=1,padx=14,pady=5)
+        try: expense_rates=self.client.exchange_rates()
+        except Exception: expense_rates=[]
+        exchange_text=tk.Label(window,text="Exchange equivalent: 0.00",bg=LIGHT,fg=NAVY,font=("Segoe UI",9,"bold"))
+        exchange_text.grid(row=len(labels),column=0,columnspan=2,pady=(8,2))
+        def update_exchange(*_args):
+            try: amount=float(values["with_vat_subtotal"].get() or 0)+float(values["without_vat_subtotal"].get() or 0)+float(values["vat"].get() or 0)
+            except ValueError: amount=0
+            lbp,usd=self.exchange_equivalents(amount,values["currency"].get(),expense_rates)
+            currency=values["currency"].get()
+            if currency=="LBP": text="USD rate not entered" if usd is None else f"USD {usd:,.2f}"
+            elif currency=="USD": text="LBP rate not entered" if lbp is None else f"LBP {lbp:,.2f}"
+            else: text=f'{"LBP rate not entered" if lbp is None else f"LBP {lbp:,.2f}"}   |   {"USD rate not entered" if usd is None else f"USD {usd:,.2f}"}'
+            exchange_text.config(text="Exchange equivalent: "+text)
+        for key in ("with_vat_subtotal","without_vat_subtotal","vat","currency"): values[key].trace_add("write",update_exchange)
         def save():
             try: self.client.add_expense({key:var.get().strip() for key,var in values.items()})
             except Exception as exc: return messagebox.showerror("Expenses",str(exc),parent=window)
             window.destroy(); self.load_transactions(); self.load_journal(); self.load_trial(); self.load_profit_loss(); self.load_financial_reports(); messagebox.showinfo("Expenses","Saved successfully")
-        self.action_button(window,"Save Expense",save).grid(row=len(labels),column=0,columnspan=2,pady=14)
+        self.action_button(window,"Save Expense",save).grid(row=len(labels)+1,column=0,columnspan=2,pady=14)
 
     def load_transactions(self):
         try: payments=self.client.payments(); expenses=self.client.expenses()
         except Exception as exc: return messagebox.showerror("Payments / Expenses",str(exc))
         self.payments_tree.delete(*self.payments_tree.get_children()); self.expenses_tree.delete(*self.expenses_tree.get_children())
         for row in payments: self.payments_tree.insert("","end",values=(row["payment_date"],row["kind"],row["party_name"],row["currency"],f'{row["amount"]:,.2f}',row["cash_account"],row["reference"],row["description"]))
-        for row in expenses: self.expenses_tree.insert("","end",values=(row["expense_date"],row["description"],row["category"],row["currency"],f'{row["subtotal"]:,.2f}',f'{row["vat"]:,.2f}',f'{row["total"]:,.2f}',row["expense_account"],row["payment_account"]))
+        for row in expenses: self.expenses_tree.insert("","end",values=(row["expense_date"],row["description"],row["category"],row["currency"],f'{row.get("with_vat_subtotal",row["subtotal"]):,.2f}',f'{row.get("without_vat_subtotal",0):,.2f}',f'{row["vat"]:,.2f}',f'{row["total"]:,.2f}',row["expense_account"],row.get("expense_without_vat_account","601100001"),row["payment_account"]))
 
     def build_journal(self):
         filters=tk.Frame(self.journal_tab,bg=LIGHT); filters.pack(fill="x",padx=10,pady=(10,0))
@@ -1166,11 +1180,13 @@ class SaberApp(tk.Tk):
         tk.Entry(controls,textvariable=self.new_account_name,width=22).pack(side="left",padx=3)
         tk.Entry(controls,textvariable=self.new_account_parent,width=9).pack(side="left",padx=3)
         ttk.Combobox(controls,textvariable=self.new_account_type,values=["asset","liability","equity","income","expense"],state="readonly",width=9).pack(side="left",padx=3)
-        self.action_button(controls,"Create / Update Account",self.save_new_account).pack(side="left",padx=5)
+        self.action_button(controls,"Create Account",self.save_new_account).pack(side="left",padx=5)
+        self.action_button(controls,"Edit Selected Name",self.rename_selected_account).pack(side="left",padx=5)
         self.action_button(controls,tr(self.language.get(),"refresh"),self.load_accounts).pack(side="right")
         self.accounts_tree=self.table(self.accounts_tab,[
             ("code","Account",100),("parent","Parent",80),("english","English",270),
             ("french","French",270),("arabic","Arabic",270),("type","Type",90)])
+        self.accounts_tree.bind("<Double-1>",lambda _event:self.load_selected_account_name())
         self.load_accounts()
 
     def save_new_account(self):
@@ -1178,6 +1194,19 @@ class SaberApp(tk.Tk):
         except Exception as exc: return messagebox.showerror("Chart of Accounts",str(exc))
         self.new_account_code.set(""); self.new_account_name.set(""); self.new_account_parent.set(""); self.load_accounts()
         messagebox.showinfo("Chart of Accounts",f'Account {account["code"]} created successfully')
+
+    def load_selected_account_name(self):
+        selected=self.accounts_tree.selection()
+        if not selected: return
+        values=self.accounts_tree.item(selected[0],"values"); self.new_account_code.set(values[0]); self.new_account_name.set(values[2])
+
+    def rename_selected_account(self):
+        selected=self.accounts_tree.selection()
+        if not selected: return messagebox.showwarning("Chart of Accounts","Select an account first")
+        code=str(self.accounts_tree.item(selected[0],"values")[0]); name=self.new_account_name.get().strip()
+        try: self.client.rename_account(code,name)
+        except Exception as exc: return messagebox.showerror("Chart of Accounts",str(exc))
+        self.load_accounts(); messagebox.showinfo("Chart of Accounts",f"Account {code} name updated")
 
     def load_accounts(self):
         try:
@@ -1207,14 +1236,16 @@ class SaberApp(tk.Tk):
         tk.Button(backup_controls,text="Restore Selected",command=self.restore_selected_backup,bg="#8B1E1E",fg="white",border=0,padx=15,pady=7).pack(side="left",padx=4)
         self.backups_tree=self.table(backups,[("name","Backup File",360),("size","Size",120),("modified","Created",180)])
         rate_controls=tk.Frame(rates,bg=LIGHT); rate_controls.pack(fill="x",padx=10,pady=10)
-        self.rate_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y")); self.rate_from=tk.StringVar(value="USD"); self.rate_to=tk.StringVar(value="LBP"); self.rate_value=tk.StringVar(value="1")
-        tk.Entry(rate_controls,textvariable=self.rate_date,width=13).pack(side="left",padx=4)
+        self.rate_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y")); self.rate_date_to=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y")); self.rate_from=tk.StringVar(value="USD"); self.rate_to=tk.StringVar(value="LBP"); self.rate_value=tk.StringVar(value="1")
+        tk.Label(rate_controls,text="Date From",bg=LIGHT).pack(side="left"); tk.Entry(rate_controls,textvariable=self.rate_date,width=12).pack(side="left",padx=4)
+        tk.Label(rate_controls,text="Date To",bg=LIGHT).pack(side="left"); tk.Entry(rate_controls,textvariable=self.rate_date_to,width=12).pack(side="left",padx=4)
         ttk.Combobox(rate_controls,textvariable=self.rate_from,values=["USD","EUR","LBP","AED"],state="readonly",width=7).pack(side="left",padx=4)
         tk.Label(rate_controls,text="to",bg=LIGHT).pack(side="left")
         ttk.Combobox(rate_controls,textvariable=self.rate_to,values=["USD","EUR","LBP","AED"],state="readonly",width=7).pack(side="left",padx=4)
         tk.Entry(rate_controls,textvariable=self.rate_value,width=14).pack(side="left",padx=4)
         self.action_button(rate_controls,"Save Rate",self.save_exchange_rate).pack(side="left",padx=5)
         self.rates_tree=self.table(rates,[("date","Date",110),("from","From",80),("to","To",80),("rate","Rate",150),("created","Saved",180)])
+        self.rates_tree.bind("<Double-1>",lambda _event:self.edit_selected_exchange_rate())
         self.base_currency=tk.StringVar(value="USD"); self.backup_hours=tk.StringVar(value="24")
         tk.Label(general,text="Base Currency",bg=LIGHT).grid(row=0,column=0,padx=14,pady=14,sticky="w")
         ttk.Combobox(general,textvariable=self.base_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=15).grid(row=0,column=1,padx=14,pady=14)
@@ -1263,9 +1294,15 @@ class SaberApp(tk.Tk):
         messagebox.showinfo("Restore","Database restored successfully. Refreshing all pages."); self.load_dashboard(); self.load_invoices(); self.load_journal(); self.load_trial(); self.load_settings_pages()
 
     def save_exchange_rate(self):
-        try: self.client.save_exchange_rate({"rate_date":self.rate_date.get(),"from_currency":self.rate_from.get(),"to_currency":self.rate_to.get(),"rate":self.rate_value.get()})
+        try: self.client.save_exchange_rate({"date_from":self.rate_date.get(),"date_to":self.rate_date_to.get(),"from_currency":self.rate_from.get(),"to_currency":self.rate_to.get(),"rate":self.rate_value.get()})
         except Exception as exc: return messagebox.showerror("Exchange Rates",str(exc))
         self.load_settings_pages(); messagebox.showinfo("Exchange Rates","Rate saved successfully")
+
+    def edit_selected_exchange_rate(self):
+        selected=self.rates_tree.selection()
+        if not selected: return
+        values=self.rates_tree.item(selected[0],"values")
+        self.rate_date.set(values[0]); self.rate_date_to.set(values[0]); self.rate_from.set(values[1]); self.rate_to.set(values[2]); self.rate_value.set(values[3])
 
     def save_general_settings(self):
         try: self.client.save_settings({"base_currency":self.base_currency.get(),"backup_interval_hours":self.backup_hours.get()})

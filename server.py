@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import secrets
 import base64
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -257,22 +259,32 @@ class ApiHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._json(400, {"error": str(exc)})
             return self._json(200, {"invoice": updated})
+        if path.startswith("/api/accounts/"):
+            code=path.rsplit("/",1)[-1]
+            try: account=self.db.rename_account(code,self._body().get("name_en"),user["id"])
+            except KeyError: return self._json(404,{"error":"Account not found"})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"account":account})
         return self._json(404, {"error": "Not found"})
 
-def run_server(host="0.0.0.0", port=8765, database="saber_accounting.db", admin_password="ChangeMe123!"):
+def run_server(host="127.0.0.1", port=8765, database="saber_accounting.db", admin_password=None):
+    admin_password = admin_password or os.environ.get("SABER_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
     db = Database(database)
     db.initialize(admin_password)
     ApiHandler.db = db
     server = ThreadingHTTPServer((host, port), ApiHandler)
     print(f"Saber Accounting server running at http://{host}:{port}")
+    print("For a new database, sign in as admin with this one-time initial password:")
+    print(admin_password)
     server.serve_forever()
 
 def main():
     parser = argparse.ArgumentParser(description="Saber Accounting shared server")
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--database", default=str(Path.home() / "SaberAccounting" / "saber_accounting_v0_7.db"))
-    parser.add_argument("--admin-password", default="ChangeMe123!")
+    parser.add_argument("--admin-password", default=None,
+                        help="Initial admin password (or set SABER_ADMIN_PASSWORD)")
     args = parser.parse_args()
     Path(args.database).parent.mkdir(parents=True, exist_ok=True)
     run_server(args.host, args.port, args.database, args.admin_password)
