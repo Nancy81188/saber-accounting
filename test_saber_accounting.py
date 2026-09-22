@@ -318,9 +318,11 @@ class SaberAccountingTest(unittest.TestCase):
             user=db.user_for_token(db.login("admin","secret")["token"])
             first=db.save_party({"name":"Supplier One","kind":"supplier","currency":"USD"},user["id"])
             second=db.save_party({"name":"Supplier Two","kind":"supplier","currency":"EUR"},user["id"])
+            customer=db.save_party({"name":"Customer One","kind":"customer","currency":"USD"},user["id"])
             self.assertRegex(first["account_number"],r"^\d{9}$")
             self.assertRegex(second["account_number"],r"^\d{9}$")
             self.assertNotEqual(first["account_number"],second["account_number"])
+            self.assertRegex(customer["account_number"],r"^4111\d{5}$")
             invoice_id=db.import_invoice({"invoice_number":"AUTO-AC","invoice_date":"22-09-2026",
                 "party_name":"Supplier One","kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111},user["id"])
             invoice=next(row for row in db.list_invoices() if row["id"]==invoice_id)

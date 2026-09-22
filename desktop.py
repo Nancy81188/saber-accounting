@@ -867,18 +867,22 @@ class SaberApp(tk.Tk):
         ttk.Combobox(header,textvariable=self.manual_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=8).grid(row=0,column=6,padx=5)
         editor=tk.LabelFrame(self.manual_tab,text="Add Debit / Credit Line",bg=LIGHT,padx=10,pady=8); editor.pack(fill="x",padx=10,pady=4)
         self.jv_account=tk.StringVar(); self.jv_description=tk.StringVar(); self.jv_debit=tk.StringVar(value="0"); self.jv_credit=tk.StringVar(value="0")
-        tk.Label(editor,text="Account (type first 3 letters)",bg=LIGHT).grid(row=0,column=0,sticky="w"); self.account_search_box(editor,self.jv_account,30).grid(row=1,column=0,padx=4)
+        tk.Label(editor,text="Account (type first 3 letters)",bg=LIGHT).grid(row=0,column=0,sticky="w"); self.jv_account_box=self.account_search_box(editor,self.jv_account,30); self.jv_account_box.grid(row=1,column=0,padx=4)
         for col,(label,var,width) in enumerate((("Line Description",self.jv_description,34),("Debit",self.jv_debit,14),("Credit",self.jv_credit,14)),1):
             tk.Label(editor,text=label,bg=LIGHT).grid(row=0,column=col,sticky="w"); tk.Entry(editor,textvariable=var,width=width).grid(row=1,column=col,padx=4)
-        self.action_button(editor,"Add Line",self.add_manual_item).grid(row=1,column=4,padx=8)
+        self.action_button(editor,"Add Line + Next Row",self.add_manual_item).grid(row=1,column=4,padx=8)
         self.manual_tree=self.table(self.manual_tab,[("account","Account",120),("name","Account Name",260),("description","Description",260),("debit","Debit",130),("credit","Credit",130)])
         actions=tk.Frame(self.manual_tab,bg=LIGHT); actions.pack(pady=(0,6))
         tk.Button(actions,text="Remove Line",command=self.remove_manual_item,bg="#8B1E1E",fg="white",border=0,padx=12,pady=6).pack(side="left",padx=3)
         self.action_button(actions,"New Voucher",self.new_manual_voucher).pack(side="left",padx=3)
-        tk.Button(actions,text="Save Voucher",command=self.save_manual_invoice,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=18,pady=7).pack(side="left",padx=3)
+        tk.Button(actions,text="Save Journal Voucher",command=self.save_manual_invoice,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=18,pady=7).pack(side="left",padx=3)
         self.action_button(actions,"Excel",lambda:self.manual_entry_report("xlsx")).pack(side="left",padx=3); self.action_button(actions,"PDF",lambda:self.manual_entry_report("pdf")).pack(side="left",padx=3)
         self.manual_totals=tk.Label(actions,text="Total D: 0.00   Total C: 0.00   Remaining: Balanced",bg=LIGHT,font=("Segoe UI",10,"bold")); self.manual_totals.pack(side="left",padx=12)
         vouchers=tk.LabelFrame(self.manual_tab,text="Saved Journal Vouchers",bg=LIGHT); vouchers.pack(fill="both",expand=True,padx=10,pady=(0,8))
+        search_bar=tk.Frame(vouchers,bg=LIGHT); search_bar.pack(fill="x",padx=6,pady=5)
+        tk.Label(search_bar,text="Search Voucher:",bg=LIGHT).pack(side="left")
+        self.manual_voucher_search=tk.StringVar(); tk.Entry(search_bar,textvariable=self.manual_voucher_search,width=38).pack(side="left",padx=6)
+        self.manual_voucher_search.trace_add("write",lambda *_args:self.populate_manual_vouchers())
         self.manual_vouchers_tree=self.table(vouchers,[("number","Voucher Number",150),("date","Date",100),("description","Description",300),("currency","Currency",80),("debit","Total Debit",130),("credit","Total Credit",130)])
         voucher_actions=tk.Frame(vouchers,bg=LIGHT); voucher_actions.pack(pady=(0,6))
         self.action_button(voucher_actions,"Edit Selected Voucher",self.edit_selected_manual_voucher).pack(side="left",padx=4)
@@ -894,7 +898,7 @@ class SaberApp(tk.Tk):
         except StopIteration: return messagebox.showwarning("Journal Voucher","Account was not found")
         item={"account_code":code,"account_name":account["name_en"],"description":self.jv_description.get().strip(),"debit":debit,"credit":credit}; self.manual_items.append(item)
         self.manual_tree.insert("","end",values=(code,account["name_en"],item["description"],f"{debit:,.2f}",f"{credit:,.2f}"))
-        self.jv_account.set(""); self.jv_description.set(""); self.jv_debit.set("0"); self.jv_credit.set("0"); self.update_manual_totals()
+        self.jv_account.set(""); self.jv_debit.set("0"); self.jv_credit.set("0"); self.update_manual_totals(); self.jv_account_box.focus_set()
 
     def remove_manual_item(self):
         selected=self.manual_tree.selection()
@@ -928,8 +932,15 @@ class SaberApp(tk.Tk):
         for row in rows:
             item=grouped.setdefault(row["entry_id"],{"id":row["entry_id"],"number":row["entry_number"],"date":row["entry_date"],"description":row["description"],"currency":row["currency"],"debit":0.0,"credit":0.0})
             item["debit"]+=float(row["debit"] or 0); item["credit"]+=float(row["credit"] or 0)
-        self.manual_voucher_rows=grouped; self.manual_vouchers_tree.delete(*self.manual_vouchers_tree.get_children())
-        for entry_id,row in sorted(grouped.items(),key=lambda pair:(pair[1]["date"],pair[1]["number"]),reverse=True): self.manual_vouchers_tree.insert("","end",iid=str(entry_id),values=(row["number"],row["date"],row["description"],row["currency"],f'{row["debit"]:,.2f}',f'{row["credit"]:,.2f}'))
+        self.manual_voucher_rows=grouped; self.populate_manual_vouchers()
+
+    def populate_manual_vouchers(self):
+        if not hasattr(self,"manual_vouchers_tree"): return
+        search=self.manual_voucher_search.get().strip().lower() if hasattr(self,"manual_voucher_search") else ""
+        self.manual_vouchers_tree.delete(*self.manual_vouchers_tree.get_children())
+        for entry_id,row in sorted(getattr(self,"manual_voucher_rows",{}).items(),key=lambda pair:(pair[1]["date"],pair[1]["number"]),reverse=True):
+            if search and search not in f'{row["number"]} {row["date"]} {row["description"]} {row["currency"]}'.lower(): continue
+            self.manual_vouchers_tree.insert("","end",iid=str(entry_id),values=(row["number"],row["date"],row["description"],row["currency"],f'{row["debit"]:,.2f}',f'{row["credit"]:,.2f}'))
 
     def edit_selected_manual_voucher(self):
         selected=self.manual_vouchers_tree.selection()
@@ -1006,6 +1017,7 @@ class SaberApp(tk.Tk):
             tk.Label(controls,text=label,bg=LIGHT).pack(side="left",padx=(5,2)); tk.Entry(controls,textvariable=var,width=width).pack(side="left",padx=4)
         ttk.Combobox(controls,textvariable=self.party_kind,values=["customer","supplier","both"],state="readonly",width=11).pack(side="left",padx=4)
         ttk.Combobox(controls,textvariable=self.party_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=7).pack(side="left",padx=4)
+        self.action_button(controls,"New Account",self.new_party_account).pack(side="left",padx=4)
         self.action_button(controls,"Save Customer / Supplier",self.save_party).pack(side="left",padx=6)
         self.action_button(controls,"Edit Selected",self.edit_selected_party).pack(side="left",padx=4)
         details=tk.Frame(self.parties_tab,bg=LIGHT); details.pack(fill="x",padx=10,pady=(0,8))
@@ -1015,10 +1027,13 @@ class SaberApp(tk.Tk):
         self.parties_tree.bind("<Double-1>",lambda _event:self.edit_selected_party())
         self.load_parties_page()
 
+    def new_party_account(self):
+        self.edit_party_id=None; self.party_name.set(""); self.party_kind.set("customer"); self.party_tax.set(""); self.party_mof.set(""); self.party_address.set(""); self.party_contact.set(""); self.party_currency.set("USD")
+
     def save_party(self):
         try: self.client.save_party({"id":self.edit_party_id,"name":self.party_name.get(),"kind":self.party_kind.get(),"tax_number":self.party_tax.get(),"mof_number":self.party_mof.get(),"address":self.party_address.get(),"contact_number":self.party_contact.get(),"currency":self.party_currency.get()})
         except Exception as exc: return messagebox.showerror("Customers / Suppliers",str(exc))
-        self.edit_party_id=None; self.party_name.set(""); self.party_tax.set(""); self.party_mof.set(""); self.party_address.set(""); self.party_contact.set(""); self.load_parties_page(); self.load_statement_parties()
+        self.new_party_account(); self.load_parties_page(); self.load_statement_parties()
         messagebox.showinfo("Customers / Suppliers","Saved successfully")
 
     def edit_selected_party(self):
@@ -1324,8 +1339,10 @@ class SaberApp(tk.Tk):
     def build_statement(self):
         controls=tk.Frame(self.statement_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=10)
         tk.Label(controls,text="Client / Supplier:",bg=LIGHT).pack(side="left")
-        self.statement_party_combo=ttk.Combobox(controls,textvariable=self.statement_party,state="readonly",width=28)
+        self.statement_party_combo=ttk.Combobox(controls,textvariable=self.statement_party,state="normal",width=34)
         self.statement_party_combo.pack(side="left",padx=5)
+        self.statement_party_combo.bind("<KeyRelease>",self.search_statement_parties)
+        self.statement_party_combo.bind("<<ComboboxSelected>>",lambda _event:self.load_statement())
         tk.Button(controls,text="Refresh Parties",command=self.refresh_statement_parties,bg=NAVY,fg="white",border=0,padx=10,pady=5).pack(side="left",padx=3)
         tk.Label(controls,text="From:",bg=LIGHT).pack(side="left",padx=(8,2))
         tk.Entry(controls,textvariable=self.statement_from_date,width=12).pack(side="left")
@@ -1352,10 +1369,16 @@ class SaberApp(tk.Tk):
     def load_statement_parties(self):
         try: parties=self.client.parties()
         except Exception as exc: return messagebox.showerror("Statement",str(exc))
-        self.statement_parties={f'{p["name"]} ({p["kind"]})':p for p in parties}
+        self.statement_parties={f'{p.get("account_number") or "No A/C"} - {p["name"]} ({p["kind"]})':p for p in parties}
         values=list(self.statement_parties)
         self.statement_party_combo["values"]=values
         if values and self.statement_party.get() not in self.statement_parties: self.statement_party.set(values[0])
+
+    def search_statement_parties(self,event=None):
+        typed=self.statement_party.get().strip().lower()
+        values=[label for label in self.statement_parties if not typed or typed in label.lower()]
+        self.statement_party_combo["values"]=values
+        if typed and values: self.statement_party_combo.event_generate("<Down>")
 
     def statement_date_range(self):
         result=[]
@@ -1370,6 +1393,11 @@ class SaberApp(tk.Tk):
 
     def load_statement(self):
         party=self.statement_parties.get(self.statement_party.get()) if hasattr(self,"statement_parties") else None
+        if not party and hasattr(self,"statement_parties"):
+            typed=self.statement_party.get().strip().lower()
+            matches=[(label,value) for label,value in self.statement_parties.items() if typed and typed in label.lower()]
+            if len(matches)==1:
+                self.statement_party.set(matches[0][0]); party=matches[0][1]
         if not party: return
         dates=self.statement_date_range()
         if dates is None: return

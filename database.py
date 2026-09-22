@@ -304,11 +304,15 @@ class Database:
         return (code,amount,Decimal("0")) if side=="D" else (code,Decimal("0"),amount)
 
     def _ensure_party_account(self, db, party):
-        if party["kind"] not in ("supplier","both"): return None
-        account_number=party["account_number"] or f"4011{party['id']:05d}"
+        if party["kind"] not in ("customer","supplier","both"): return None
+        prefix="4111" if party["kind"]=="customer" else "4011"
+        account_number=party["account_number"] or f"{prefix}{party['id']:05d}"
         db.execute("UPDATE parties SET account_number=? WHERE id=?",(account_number,party["id"]))
-        db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code='4011'))",
-            (account_number,f"Supplier - {party['name']}","liability"))
+        parent="4111" if party["kind"]=="customer" else "4011"
+        label="Customer" if party["kind"]=="customer" else "Supplier"
+        account_type="asset" if party["kind"]=="customer" else "liability"
+        db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code=?))",
+            (account_number,f"{label} - {party['name']}",account_type,parent))
         return account_number
 
     def _date_year(self, value):
