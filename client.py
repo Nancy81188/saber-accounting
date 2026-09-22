@@ -36,6 +36,7 @@ class ApiClient:
     def professional_dashboard(self): return self.request("GET","/api/dashboard/professional")
     def invoices(self): return self.request("GET", "/api/invoices")["items"]
     def accounts(self): return self.request("GET", "/api/accounts")["items"]
+    def save_account(self,item): return self.request("POST","/api/accounts",item)
     def parties(self): return self.request("GET", "/api/parties")["items"]
     def statement(self, party_id, from_date=None, to_date=None, currency=None):
         query = urlencode({key:value for key,value in {

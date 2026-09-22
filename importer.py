@@ -209,8 +209,8 @@ def read_invoices(path: str | Path, sheet_name: str | None = None, default_curre
                 "currency_issue": currency_issue,
                 "kind": "sale" if kind in {"sale", "sales", "customer"} else "purchase",
                 "supplier_account": str(get("supplier_account") or "4011").strip(),
-                "vat_account": str(get("vat_account") or "4426.6").strip(),
-                "expense_account": str(get("expense_account") or "6011").strip(),
+                "vat_account": str(get("vat_account") or "442660000").strip(),
+                "expense_account": str(get("expense_account") or "601100000").strip(),
                 "source_file": Path(path).name,
                 "source_row": row_number,
             })

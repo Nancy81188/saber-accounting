@@ -142,6 +142,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             try: result=self.db.save_party(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"party":result})
+        if path == "/api/accounts":
+            try: self.db.save_account(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"saved":True})
         if path == "/api/users":
             if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
             try: result=self.db.save_user(body,user["id"])

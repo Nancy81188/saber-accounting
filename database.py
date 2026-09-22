@@ -13,6 +13,9 @@ from pathlib import Path
 
 from lebanese_accounts import DEFAULT_LEBANESE_ACCOUNTS, LEBANESE_ACCOUNTS
 
+EXPENSE_ACCOUNT_9 = "601100000"
+VAT_ACCOUNT_9 = "442660000"
+
 SCHEMA = """
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users (
@@ -32,7 +35,8 @@ CREATE TABLE IF NOT EXISTS invoices (
  id INTEGER PRIMARY KEY, invoice_number TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('sale','purchase')),
  invoice_date TEXT, party_id INTEGER REFERENCES parties(id), currency TEXT NOT NULL, exchange_rate TEXT NOT NULL DEFAULT '1',
  subtotal TEXT, vat TEXT, total TEXT, status TEXT NOT NULL DEFAULT 'posted', currency_issue TEXT NOT NULL DEFAULT '',
- supplier_account TEXT NOT NULL DEFAULT '4011', vat_account TEXT NOT NULL DEFAULT '4426.6', expense_account TEXT NOT NULL DEFAULT '6011',
+ supplier_account TEXT NOT NULL DEFAULT '4011', vat_account TEXT NOT NULL DEFAULT '442660000', expense_account TEXT NOT NULL DEFAULT '601100000',
+ entry_type TEXT NOT NULL DEFAULT 'purchase', debit_override TEXT, credit_override TEXT,
  source_file TEXT, source_row INTEGER, due_date TEXT, payment_status TEXT NOT NULL DEFAULT 'unpaid',
  amount_paid TEXT NOT NULL DEFAULT '0', cancelled_at TEXT, cancellation_reason TEXT,
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
@@ -153,6 +157,9 @@ class Database:
                 "amount_paid": "TEXT NOT NULL DEFAULT '0'",
                 "cancelled_at": "TEXT",
                 "cancellation_reason": "TEXT",
+                "entry_type": "TEXT NOT NULL DEFAULT 'purchase'",
+                "debit_override": "TEXT",
+                "credit_override": "TEXT",
             }
             for column, definition in lifecycle_columns.items():
                 if column not in invoice_columns:
@@ -185,6 +192,13 @@ class Database:
                        (DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"],))
             db.execute("UPDATE invoices SET expense_account=? WHERE expense_account='5100'",
                        (DEFAULT_LEBANESE_ACCOUNTS["purchases"],))
+            db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code='6011'))",
+                       (EXPENSE_ACCOUNT_9,"General Expenses - 9 Digit","expense"))
+            db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code='4426.6'))",
+                       (VAT_ACCOUNT_9,"VAT Receivable - 9 Digit","asset"))
+            db.execute("UPDATE invoices SET expense_account=? WHERE expense_account='6011'",(EXPENSE_ACCOUNT_9,))
+            db.execute("UPDATE invoices SET vat_account=? WHERE vat_account='4426.6'",(VAT_ACCOUNT_9,))
+            db.execute("UPDATE invoices SET entry_type=kind WHERE entry_type IS NULL OR entry_type='' OR (entry_type='purchase' AND kind='sale')")
             suppliers=db.execute("SELECT id,name,account_number FROM parties WHERE kind IN ('supplier','both') ORDER BY id").fetchall()
             for supplier in suppliers:
                 account_number=supplier["account_number"] or f"4011{supplier['id']:05d}"
@@ -344,7 +358,10 @@ class Database:
         # No uniqueness constraint is applied to invoice numbers: duplicates are intentionally retained.
         self._assert_period_open(item.get("invoice_date"))
         with self.connect() as db:
-            party_kind = "customer" if item["kind"] == "sale" else "supplier"
+            entry_type=str(item.get("entry_type") or item.get("kind") or "purchase").strip().lower().replace(" ","_")
+            if entry_type not in ("sale","purchase","assets","expenses","expense_without_vat"): entry_type="purchase"
+            kind="sale" if entry_type=="sale" else "purchase"
+            party_kind = "customer" if kind == "sale" else "supplier"
             db.execute("INSERT OR IGNORE INTO parties(kind,name,currency) VALUES(?,?,?)", (party_kind, item.get("party_name") or "Unspecified", item.get("currency", "USD")))
             party = db.execute("SELECT * FROM parties WHERE kind=? AND name=?", (party_kind, item.get("party_name") or "Unspecified")).fetchone()
             subtotal = Decimal(str(item.get("subtotal") or 0)); vat = Decimal(str(item.get("vat") or 0)); total = Decimal(str(item.get("total") or subtotal + vat))
@@ -352,14 +369,15 @@ class Database:
             status = "posted" if total == subtotal + vat and not currency_issue.startswith(("conflicting:", "unsupported:")) else "review"
             supplier_account = str(item.get("supplier_account") or DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]).strip()
             party_account=self._ensure_party_account(db,party)
-            if item["kind"]=="purchase" and (not item.get("supplier_account") or supplier_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]):
+            if kind=="purchase" and (not item.get("supplier_account") or supplier_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]):
                 supplier_account=party_account
-            vat_account = str(item.get("vat_account") or DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"]).strip()
-            expense_account = str(item.get("expense_account") or DEFAULT_LEBANESE_ACCOUNTS["purchases"]).strip()
+            vat_account = str(item.get("vat_account") or VAT_ACCOUNT_9).strip()
+            expense_account = str(item.get("expense_account") or EXPENSE_ACCOUNT_9).strip()
+            if entry_type=="expense_without_vat": vat=Decimal("0"); total=subtotal
             account_definitions = [
                 (supplier_account, "Supplier Account", "liability"),
                 (vat_account, "VAT Account", "asset"),
-                (expense_account, "Expense Account", "expense"),
+                (expense_account, "Asset Account" if entry_type=="assets" else "Expense Account", "asset" if entry_type=="assets" else "expense"),
             ]
             for code, name, account_type in account_definitions:
                 db.execute(
@@ -371,17 +389,19 @@ class Database:
             if amount_paid < 0 or amount_paid > total:
                 raise ValueError("Amount paid must be between zero and invoice total")
             payment_status = "paid" if amount_paid == total and total > 0 else "partial" if amount_paid > 0 else "unpaid"
-            cur = db.execute("""INSERT INTO invoices(invoice_number,kind,invoice_date,party_id,currency,exchange_rate,subtotal,vat,total,status,currency_issue,supplier_account,vat_account,expense_account,source_file,source_row,due_date,payment_status,amount_paid,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
-                str(item["invoice_number"]), item["kind"], item.get("invoice_date"), party["id"], item.get("currency", "USD"),
-                str(item.get("exchange_rate", 1)), str(item.get("subtotal") or 0), str(item.get("vat") or 0), str(item.get("total") or 0),
-                status, currency_issue, supplier_account, vat_account, expense_account,
+            debit_override=item.get("debit"); credit_override=item.get("credit")
+            cur = db.execute("""INSERT INTO invoices(invoice_number,kind,invoice_date,party_id,currency,exchange_rate,subtotal,vat,total,status,currency_issue,supplier_account,vat_account,expense_account,entry_type,debit_override,credit_override,source_file,source_row,due_date,payment_status,amount_paid,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                str(item["invoice_number"]), kind, item.get("invoice_date"), party["id"], item.get("currency", "USD"),
+                str(item.get("exchange_rate", 1)), str(subtotal), str(vat), str(total),
+                status, currency_issue, supplier_account, vat_account, expense_account,entry_type,
+                None if debit_override in (None,"") else str(Decimal(str(debit_override))),None if credit_override in (None,"") else str(Decimal(str(credit_override))),
                 item.get("source_file"), item.get("source_row"), due_date, payment_status, str(amount_paid), user_id, utcnow()))
             invoice_id = cur.lastrowid
             entry_number = f"INV-{invoice_id}"
             entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (entry_number, item.get("invoice_date"), f"{item['kind'].title()} invoice {item['invoice_number']}", "invoice", invoice_id, item.get("currency", "USD"), user_id, utcnow()))
-            if item["kind"] == "sale":
+                (entry_number, item.get("invoice_date"), f"{entry_type.replace('_',' ').title()} {item['invoice_number']}", "invoice", invoice_id, item.get("currency", "USD"), user_id, utcnow()))
+            if kind == "sale":
                 lines = [(DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"], total, 0), (DEFAULT_LEBANESE_ACCOUNTS["sales"], 0, subtotal), (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"], 0, vat)]
             else:
                 lines = [(expense_account, subtotal, 0), (vat_account, vat, 0), (supplier_account, 0, total)]
@@ -452,10 +472,11 @@ class Database:
         if missing:
             raise ValueError("Missing fields: " + ", ".join(missing))
         self._assert_period_open(item.get("invoice_date"))
-        kind = str(item["kind"]).lower()
+        entry_type=str(item.get("entry_type") or item["kind"]).lower().replace(" ","_")
+        if entry_type not in ("sale","purchase","assets","expenses","expense_without_vat"):
+            raise ValueError("Type must be Sale, Purchase, Assets, Expenses, or Expense without VAT")
+        kind = "sale" if entry_type=="sale" else "purchase"
         currency = str(item["currency"]).upper()
-        if kind not in ("sale", "purchase"):
-            raise ValueError("Type must be sale or purchase")
         if currency not in ("USD", "EUR", "LBP", "AED"):
             raise ValueError("Currency must be USD, EUR, LBP, or AED")
         try:
@@ -468,9 +489,12 @@ class Database:
             raise ValueError("Amounts cannot be negative")
         if total != subtotal + vat:
             raise ValueError("Total must equal Before VAT plus VAT")
+        if entry_type=="expense_without_vat": vat=Decimal("0"); total=subtotal
         supplier_account = str(item.get("supplier_account") or DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]).strip()
-        vat_account = str(item.get("vat_account") or DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"]).strip()
-        expense_account = str(item.get("expense_account") or DEFAULT_LEBANESE_ACCOUNTS["purchases"]).strip()
+        vat_account = str(item.get("vat_account") or VAT_ACCOUNT_9).strip()
+        expense_account = str(item.get("expense_account") or EXPENSE_ACCOUNT_9).strip()
+        debit_override=Decimal(str(item.get("debit") or 0)); credit_override=Decimal(str(item.get("credit") or 0))
+        if debit_override<0 or credit_override<0: raise ValueError("D and C cannot be negative")
         status = str(item.get("status") or "posted").strip().lower()
         if status not in ("posted", "review"):
             raise ValueError("Status must be posted or review")
@@ -495,17 +519,17 @@ class Database:
             for code, name, account_type in (
                 (supplier_account, "Supplier Account", "liability"),
                 (vat_account, "VAT Account", "asset"),
-                (expense_account, "Expense Account", "expense"),
+                (expense_account, "Asset Account" if entry_type=="assets" else "Expense Account", "asset" if entry_type=="assets" else "expense"),
             ):
                 db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)", (code, name, account_type))
             db.execute("""UPDATE invoices SET invoice_number=?,kind=?,invoice_date=?,party_id=?,currency=?,
-                subtotal=?,vat=?,total=?,status=?,supplier_account=?,vat_account=?,expense_account=?,
-                due_date=?,payment_status=?,amount_paid=? WHERE id=?""",
+                subtotal=?,vat=?,total=?,status=?,supplier_account=?,vat_account=?,expense_account=?,entry_type=?,
+                debit_override=?,credit_override=?,due_date=?,payment_status=?,amount_paid=? WHERE id=?""",
                 (str(item["invoice_number"]).strip(), kind, str(item["invoice_date"]).strip(), party["id"], currency,
                  str(subtotal), str(vat), str(total), status, supplier_account, vat_account, expense_account,
-                 due_date, payment_status, str(amount_paid), invoice_id))
+                 entry_type,str(debit_override),str(credit_override),due_date, payment_status, str(amount_paid), invoice_id))
             entry = db.execute("SELECT id FROM journal_entries WHERE source_type='invoice' AND source_id=?", (invoice_id,)).fetchone()
-            description = f"{kind.title()} invoice {str(item['invoice_number']).strip()}"
+            description = f"{entry_type.replace('_',' ').title()} {str(item['invoice_number']).strip()}"
             if entry:
                 entry_id = entry["id"]
                 db.execute("DELETE FROM journal_lines WHERE entry_id=?", (entry_id,))
@@ -527,7 +551,7 @@ class Database:
                        (user_id, "update", "invoice", invoice_id, json.dumps({"fields": sorted(item.keys())}), utcnow()))
             row = db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,
                 i.subtotal,i.vat,i.total,i.status,i.currency_issue,i.supplier_account,i.vat_account,
-                i.expense_account,i.source_row,i.due_date,i.payment_status,i.amount_paid,
+                i.expense_account,i.entry_type,i.debit_override,i.credit_override,i.source_row,i.due_date,i.payment_status,i.amount_paid,
                 CAST(i.total AS REAL)-CAST(i.amount_paid AS REAL) outstanding
                 FROM invoices i LEFT JOIN parties p ON p.id=i.party_id WHERE i.id=?""",
                 (invoice_id,)).fetchone()
@@ -557,13 +581,13 @@ class Database:
             invoice = dict(row)
         updated_values = {
             "invoice_number": invoice["invoice_number"], "invoice_date": invoice["invoice_date"],
-            "party_name": invoice["party_name"], "kind": invoice["kind"], "currency": invoice["currency"],
+            "party_name": invoice["party_name"], "kind": invoice["kind"], "entry_type":invoice.get("entry_type") or invoice["kind"], "currency": invoice["currency"],
             "subtotal": str(Decimal(str(invoice["subtotal"] or 0)) + subtotal),
             "vat": str(Decimal(str(invoice["vat"] or 0)) + vat),
             "total": str(Decimal(str(invoice["total"] or 0)) + total),
             "supplier_account": invoice["supplier_account"], "vat_account": invoice["vat_account"],
             "expense_account": invoice["expense_account"], "status": "posted",
-            "due_date": invoice.get("due_date"), "amount_paid": invoice.get("amount_paid", 0),
+            "due_date": invoice.get("due_date"), "amount_paid": invoice.get("amount_paid", 0),"debit":invoice.get("debit",0),"credit":invoice.get("credit",0),
         }
         updated = self.update_invoice(invoice_id, updated_values, user_id)
         with self.connect() as db:
@@ -611,8 +635,9 @@ class Database:
             source = dict(row)
             items = [dict(item) for item in db.execute("SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY id", (invoice_id,))]
         new_number = self.next_invoice_number(source["kind"], source["invoice_date"])
-        payload = {key:source.get(key) for key in ("invoice_date","party_name","kind","currency","exchange_rate",
+        payload = {key:source.get(key) for key in ("invoice_date","party_name","kind","entry_type","currency","exchange_rate",
             "subtotal","vat","total","supplier_account","vat_account","expense_account","due_date")}
+        payload.update({"debit":source.get("debit_override"),"credit":source.get("credit_override")})
         payload.update({"invoice_number":new_number,"amount_paid":0,"source_file":"Duplicated invoice","source_row":None})
         new_id = self.import_invoice(payload, user_id)
         if items:
@@ -798,8 +823,8 @@ class Database:
         if not description: raise ValueError("Expense description is required")
         subtotal=Decimal(str(item.get("subtotal") or 0)); vat=Decimal(str(item.get("vat") or 0)); total=subtotal+vat
         if subtotal<0 or vat<0 or total<=0: raise ValueError("Expense amounts must be valid")
-        currency=str(item.get("currency") or "USD").upper(); expense_account=str(item.get("expense_account") or "6011").strip()
-        vat_account=str(item.get("vat_account") or DEFAULT_LEBANESE_ACCOUNTS["vat_receivable"]).strip(); payment_account=str(item.get("payment_account") or "531").strip()
+        currency=str(item.get("currency") or "USD").upper(); expense_account=str(item.get("expense_account") or EXPENSE_ACCOUNT_9).strip()
+        vat_account=str(item.get("vat_account") or VAT_ACCOUNT_9).strip(); payment_account=str(item.get("payment_account") or "531").strip()
         with self.connect() as db:
             for code,name,typ in ((expense_account,"Expense Account","expense"),(vat_account,"VAT Receivable","asset"),(payment_account,"Cash / Bank Account","asset")):
                 db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(code,name,typ))
@@ -910,9 +935,9 @@ class Database:
 
     def list_invoices(self, limit=500):
         with self.connect() as db:
-            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.currency,i.subtotal,i.vat,i.total,
-                CASE WHEN i.kind='sale' THEN CAST(i.total AS REAL) ELSE 0 END debit,
-                CASE WHEN i.kind='purchase' THEN CAST(i.total AS REAL) ELSE 0 END credit,
+            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.kind,i.entry_type,i.currency,i.subtotal,i.vat,i.total,
+                COALESCE(CAST(i.debit_override AS REAL),CASE WHEN i.kind='sale' THEN CAST(i.total AS REAL) ELSE 0 END) debit,
+                COALESCE(CAST(i.credit_override AS REAL),CASE WHEN i.kind='purchase' THEN CAST(i.total AS REAL) ELSE 0 END) credit,
                 i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.source_row,
                 i.due_date,i.payment_status,CAST(i.amount_paid AS REAL) amount_paid,
                 CAST(i.total AS REAL)-CAST(i.amount_paid AS REAL) outstanding,i.cancelled_at,i.cancellation_reason,
@@ -924,6 +949,24 @@ class Database:
             return [dict(r) for r in db.execute("""SELECT a.code,a.name_en,a.name_ar,a.name_fr,a.type,
                 p.code parent_code FROM accounts a LEFT JOIN accounts p ON p.id=a.parent_id
                 ORDER BY CASE WHEN instr(a.code,'.')>0 THEN replace(a.code,'.','') ELSE a.code END""")]
+
+    def save_account(self,item,user_id):
+        code=str(item.get("code") or "").strip(); name=str(item.get("name_en") or "").strip()
+        account_type=str(item.get("type") or "expense").strip().lower(); parent=str(item.get("parent_code") or "").strip() or None
+        if len(code)!=9 or not code.isdigit(): raise ValueError("Account number must contain exactly 9 digits")
+        if not name or account_type not in ("asset","liability","equity","income","expense"): raise ValueError("Enter a valid account name and type")
+        with self.connect() as db:
+            parent_id=None
+            if parent:
+                row=db.execute("SELECT id FROM accounts WHERE code=?",(parent,)).fetchone()
+                if not row: raise ValueError("Parent account was not found")
+                parent_id=row["id"]
+            db.execute("""INSERT INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,?)
+                ON CONFLICT(code) DO UPDATE SET name_en=excluded.name_en,type=excluded.type,parent_id=excluded.parent_id""",
+                (code,name,account_type,parent_id))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",
+                (user_id,"save","account",json.dumps({"code":code,"name":name}),utcnow()))
+        return True
 
     def dashboard(self):
         with self.connect() as db:

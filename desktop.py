@@ -113,18 +113,22 @@ class SaberApp(tk.Tk):
         tk.Label(top,text=tr(lang,"title"),bg=NAVY,fg="white",font=("Segoe UI",20,"bold")).pack(side="left",padx=8,pady=19)
         tk.Label(top,text="11% VAT  |  USD · LBP · EUR · AED",bg=NAVY,fg=GOLD,font=("Segoe UI",10,"bold")).pack(side="right",padx=28)
         tab_nav=tk.Frame(self,bg=LIGHT); tab_nav.pack(fill="x",padx=18,pady=(8,0))
-        notebook=ttk.Notebook(self); self.main_notebook=notebook; notebook.pack(fill="both",expand=True,padx=18,pady=16)
+        ttk.Style(self).layout("Tabless.TNotebook.Tab",[])
+        notebook=ttk.Notebook(self,style="Tabless.TNotebook"); self.main_notebook=notebook; notebook.pack(fill="both",expand=True,padx=18,pady=(6,16))
         self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.parties_tab=tk.Frame(notebook,bg=LIGHT); self.transactions_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.reports_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT); self.settings_tab=tk.Frame(notebook,bg=LIGHT)
         notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text=tr(lang,"manual_entry")); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.parties_tab,text=tr(lang,"customers_suppliers")); notebook.add(self.transactions_tab,text=tr(lang,"payments_expenses")); notebook.add(self.journal_tab,text=tr(lang,"general_journal")); notebook.add(self.trial_tab,text=tr(lang,"trial_balance")); notebook.add(self.pnl_tab,text=tr(lang,"profit_loss")); notebook.add(self.reports_tab,text=tr(lang,"financial_reports")); notebook.add(self.statement_tab,text=tr(lang,"statement_account")); notebook.add(self.accounts_tab,text=tr(lang,"chart_accounts")); notebook.add(self.settings_tab,text=tr(lang,"security_backup_rates"))
         self.main_tab_pages=[self.dashboard_tab,self.invoices_tab,self.manual_tab,self.import_tab,self.parties_tab,self.transactions_tab,self.journal_tab,self.trial_tab,self.pnl_tab,self.reports_tab,self.statement_tab,self.accounts_tab,self.settings_tab]
         self.tab_names=[notebook.tab(tab,"text") for tab in notebook.tabs()]
-        self.visible_tab_start=0
         self.tab_choice=tk.StringVar(value=self.tab_names[0])
-        tk.Button(tab_nav,text="◀",command=lambda:self.move_main_tab(-1),bg=NAVY,fg="white",border=0,width=3,pady=3).pack(side="left",padx=(3,6))
-        tk.Label(tab_nav,text="6 tabs visible — use arrows to scroll",bg=LIGHT,fg="#5f6b76").pack(side="left")
-        tk.Button(tab_nav,text="▶",command=lambda:self.move_main_tab(1),bg=NAVY,fg="white",border=0,width=3,pady=3).pack(side="left",padx=6)
-        self.show_tab_window(0)
-        notebook.bind("<<NotebookTabChanged>>",lambda _event:self.tab_choice.set(notebook.tab(notebook.select(),"text")))
+        self.tab_buttons=[]
+        for index,(page,name) in enumerate(zip(self.main_tab_pages,self.tab_names)):
+            row=0 if index<7 else 1; column=index if index<7 else index-7
+            tab_nav.grid_columnconfigure(column,weight=1,uniform="main_tabs")
+            button=tk.Button(tab_nav,text=name,command=lambda p=page:self.select_main_tab(p),bg=NAVY,fg="white",
+                activebackground=GOLD,activeforeground=NAVY,border=1,font=("Segoe UI",8,"bold"),pady=5,wraplength=145)
+            button.grid(row=row,column=column,sticky="nsew",padx=2,pady=2); self.tab_buttons.append(button)
+        notebook.bind("<<NotebookTabChanged>>",lambda _event:self.highlight_main_tab())
+        self.highlight_main_tab()
         filter_bar=tk.Frame(self,bg=LIGHT); filter_bar.pack(fill="x",padx=28)
         tk.Label(filter_bar,text="Show currency:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
         currency_filter=ttk.Combobox(filter_bar,textvariable=self.view_currency,values=["All Currencies","USD","EUR","LBP","AED"],state="readonly",width=16)
@@ -148,6 +152,14 @@ class SaberApp(tk.Tk):
         if direction>0 and current==len(self.main_tab_pages)-1: start=0
         elif direction<0 and current==0: start=max(0,len(self.main_tab_pages)-6)
         self.show_tab_window(start,target)
+
+    def select_main_tab(self,page):
+        self.main_notebook.select(page); self.highlight_main_tab()
+
+    def highlight_main_tab(self):
+        selected=self.main_notebook.select()
+        for page,button in zip(getattr(self,"main_tab_pages",[]),getattr(self,"tab_buttons",[])):
+            button.config(bg=GOLD if str(page)==selected else NAVY,fg=NAVY if str(page)==selected else "white")
 
     def show_tab_window(self,start,selected_index=None):
         maximum=max(0,len(self.main_tab_pages)-6); self.visible_tab_start=max(0,min(start,maximum))
@@ -263,7 +275,7 @@ class SaberApp(tk.Tk):
             canvas.create_text(x+12,height-12,text=str(row["month"])[5:],font=("Segoe UI",7))
 
     def build_invoices(self):
-        l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),105),("date",tr(l,"date"),95),("due","Due Date",95),("party",tr(l,"party"),180),("kind","Type",70),("currency",tr(l,"currency"),65),("total",tr(l,"total"),95),("paid","Paid",90),("outstanding","Outstanding",100),("payment","Payment",85),("debit","Debit",95),("credit","Credit",95),("status","Status",80),("attachments","Files",55)])
+        l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),105),("date",tr(l,"date"),95),("party",tr(l,"party"),170),("kind","Type",115),("currency",tr(l,"currency"),65),("total",tr(l,"total"),95),("lbp","LBP Eq.",110),("usd","USD Eq.",95),("debit","D",90),("credit","C",90),("status","Status",75)])
         invoice_actions=tk.Frame(self.invoices_tab,bg=LIGHT); invoice_actions.pack(pady=(0,10))
         tk.Button(invoice_actions,text=tr(l,"refresh"),command=self.load_invoices,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(side="left",padx=4)
         tk.Button(invoice_actions,text="Save Data",command=self.confirm_invoice_data_saved,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
@@ -283,13 +295,15 @@ class SaberApp(tk.Tk):
         self.load_invoices()
 
     def load_invoices(self):
-        try: rows=self.client.invoices()
+        try: rows=self.client.invoices(); rates=self.client.exchange_rates()
         except Exception as exc: return messagebox.showerror("Error",str(exc))
         selected=self.view_currency.get()
         rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
         self.invoice_rows={str(r["id"]):r for r in rows}
         self.invoice_tree.delete(*self.invoice_tree.get_children())
-        for r in rows: self.invoice_tree.insert("","end",iid=str(r["id"]),values=(r["invoice_number"],r["invoice_date"],r.get("due_date") or "",r["party_name"],r["kind"],r["currency"],r["total"],r.get("amount_paid",0),r.get("outstanding",0),r.get("payment_status","unpaid"),r["debit"],r["credit"],r["status"],r.get("attachment_count",0)))
+        for r in rows:
+            lbp,usd=self.exchange_equivalents(float(r["total"] or 0),r["currency"],rates)
+            self.invoice_tree.insert("","end",iid=str(r["id"]),values=(r["invoice_number"],r["invoice_date"],r["party_name"],r.get("entry_type") or r["kind"],r["currency"],r["total"],"" if lbp is None else f"{lbp:,.2f}","" if usd is None else f"{usd:,.2f}",r["debit"],r["credit"],r["status"]))
 
     def edit_selected_invoice(self):
         selected=self.invoice_tree.selection()
@@ -305,7 +319,7 @@ class SaberApp(tk.Tk):
             "invoice_number":tk.StringVar(value=row["invoice_number"]),
             "invoice_date":tk.StringVar(value=row["invoice_date"]),
             "party_name":tk.StringVar(value=row["party_name"]),
-            "kind":tk.StringVar(value=row["kind"]),
+            "kind":tk.StringVar(value=row.get("entry_type") or row["kind"]),
             "currency":tk.StringVar(value=row["currency"]),
             "subtotal":tk.StringVar(value=row["subtotal"]),
             "vat":tk.StringVar(value=row["vat"]),
@@ -316,6 +330,8 @@ class SaberApp(tk.Tk):
             "status":tk.StringVar(value=row["status"]),
             "due_date":tk.StringVar(value=row.get("due_date") or ""),
             "amount_paid":tk.StringVar(value=row.get("amount_paid") or "0"),
+            "debit":tk.StringVar(value=row.get("debit") or "0"),
+            "credit":tk.StringVar(value=row.get("credit") or "0"),
         }
         fields=[
             ("Invoice Number","invoice_number"),("Date (DD-MM-YYYY)","invoice_date"),
@@ -323,13 +339,13 @@ class SaberApp(tk.Tk):
             ("Before VAT","subtotal"),("VAT","vat"),("Total","total"),
             ("Supplier Account (C - Credit)","supplier_account"),("VAT Account (D - Debit)","vat_account"),
             ("Expense Account (D - Debit)","expense_account"),("Status","status"),
-            ("Due Date (DD-MM-YYYY)","due_date"),("Amount Paid","amount_paid"),
+            ("Due Date (DD-MM-YYYY)","due_date"),("Amount Paid","amount_paid"),("D","debit"),("C","credit"),
         ]
         for index,(label,key) in enumerate(fields):
             grid_row=index//2; grid_column=(index%2)*2
             tk.Label(window,text=label,bg=LIGHT,anchor="w").grid(row=grid_row,column=grid_column,sticky="w",padx=(14,5),pady=8)
             if key=="kind":
-                widget=ttk.Combobox(window,textvariable=variables[key],values=["purchase","sale"],state="readonly",width=24)
+                widget=ttk.Combobox(window,textvariable=variables[key],values=["purchase","sale","assets","expenses","expense_without_vat"],state="readonly",width=24)
             elif key=="currency":
                 widget=ttk.Combobox(window,textvariable=variables[key],values=["USD","EUR","LBP","AED"],state="readonly",width=24)
             elif key=="status":
@@ -350,10 +366,11 @@ class SaberApp(tk.Tk):
                 except ValueError:
                     return messagebox.showwarning("Invoices","Date must use DD-MM-YYYY",parent=window)
             try:
-                subtotal=float(values["subtotal"]); vat=float(values["vat"]); total=float(values["total"])
+                subtotal=float(values["subtotal"]); vat=float(values["vat"]); total=float(values["total"]); float(values["debit"]); float(values["credit"])
                 amount_paid=float(values["amount_paid"] or 0)
             except ValueError:
                 return messagebox.showwarning("Invoices","Before VAT, VAT, and Total must be valid numbers",parent=window)
+            if values["kind"]=="expense_without_vat": values["vat"]="0"; values["total"]=str(subtotal); vat=0; total=subtotal
             if abs((subtotal+vat)-total)>0.005:
                 return messagebox.showwarning("Invoices","Total must equal Before VAT plus VAT",parent=window)
             if amount_paid<0 or amount_paid>total:
@@ -488,7 +505,7 @@ class SaberApp(tk.Tk):
         window=tk.Toplevel(self); window.title("Add Invoice Row"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
         defaults={"invoice_number":"","invoice_date":datetime.now().strftime("%d-%m-%Y"),"party_name":"",
                   "kind":"purchase","currency":"USD","subtotal":"0","vat":"0","total":"0",
-                  "supplier_account":"4011","vat_account":"4426.6","expense_account":"6011",
+                  "supplier_account":"4011","vat_account":"442660000","expense_account":"601100000",
                   "due_date":"","amount_paid":"0"}
         variables={key:tk.StringVar(value=value) for key,value in defaults.items()}
         fields=[("Invoice Number","invoice_number"),("Date (DD-MM-YYYY)","invoice_date"),("Customer / Supplier","party_name"),
@@ -498,7 +515,7 @@ class SaberApp(tk.Tk):
         for index,(label,key) in enumerate(fields):
             rr=index//2; cc=(index%2)*2
             tk.Label(window,text=label,bg=LIGHT).grid(row=rr,column=cc,sticky="w",padx=(14,5),pady=7)
-            if key=="kind": widget=ttk.Combobox(window,textvariable=variables[key],values=["purchase","sale"],state="readonly",width=24)
+            if key=="kind": widget=ttk.Combobox(window,textvariable=variables[key],values=["purchase","sale","assets","expenses","expense_without_vat"],state="readonly",width=24)
             elif key=="currency": widget=ttk.Combobox(window,textvariable=variables[key],values=["USD","EUR","LBP","AED"],state="readonly",width=24)
             else: widget=tk.Entry(window,textvariable=variables[key],width=27)
             widget.grid(row=rr,column=cc+1,padx=(5,14),pady=7)
@@ -549,13 +566,14 @@ class SaberApp(tk.Tk):
         self.manual_no=tk.StringVar(); self.manual_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y"))
         self.manual_party=tk.StringVar(); self.manual_kind=tk.StringVar(value="purchase"); self.manual_currency=tk.StringVar(value="USD")
         self.manual_supplier_account=tk.StringVar(value="4011")
-        self.manual_vat_account=tk.StringVar(value="4426.6")
-        self.manual_expense_account=tk.StringVar(value="6011")
+        self.manual_vat_account=tk.StringVar(value="442660000")
+        self.manual_expense_account=tk.StringVar(value="601100000")
         fields=[("Invoice Number",self.manual_no,16),("Date",self.manual_date,14),("Customer / Supplier",self.manual_party,28)]
         for col,(label,var,width) in enumerate(fields):
             tk.Label(header,text=label,bg=LIGHT).grid(row=0,column=col*2,sticky="w",padx=4)
             tk.Entry(header,textvariable=var,width=width).grid(row=0,column=col*2+1,padx=4)
-        ttk.Combobox(header,textvariable=self.manual_kind,values=["purchase","sale"],state="readonly",width=10).grid(row=0,column=6,padx=5)
+        manual_type=ttk.Combobox(header,textvariable=self.manual_kind,values=["purchase","sale","assets","expenses","expense_without_vat"],state="readonly",width=18)
+        manual_type.grid(row=0,column=6,padx=5); manual_type.bind("<<ComboboxSelected>>",lambda _event:self.manual_type_changed())
         ttk.Combobox(header,textvariable=self.manual_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=8).grid(row=0,column=7,padx=5)
         account_fields=[
             ("Supplier Account (C)",self.manual_supplier_account),
@@ -604,8 +622,9 @@ class SaberApp(tk.Tk):
             quantity=float(self.item_quantity.get() or 0); price=float(self.item_price.get() or 0)
             subtotal=float(self.item_subtotal.get() or 0) if self.subtotal_override.get() else quantity*price
             if not self.subtotal_override.get(): self.item_subtotal.set(f"{subtotal:.2f}")
-            rate=float(self.item_vat_rate.get() or 0)
+            rate=0 if self.manual_kind.get()=="expense_without_vat" else float(self.item_vat_rate.get() or 0)
             vat=float(self.item_vat.get() or 0) if self.vat_override.get() else subtotal*rate/100
+            if self.manual_kind.get()=="expense_without_vat": vat=0; self.item_vat_rate.set("0")
             if not self.vat_override.get(): self.item_vat.set(f"{vat:.2f}")
             self.item_total.set(f"{subtotal+vat:.2f}")
             return subtotal,vat,subtotal+vat
@@ -626,7 +645,7 @@ class SaberApp(tk.Tk):
               "subtotal":subtotal,"vat_rate":rate,"vat":vat,"total":total}
         self.manual_items.append(item)
         debit=total if self.manual_kind.get()=="sale" else 0
-        credit=total if self.manual_kind.get()=="purchase" else 0
+        credit=total if self.manual_kind.get()!="sale" else 0
         self.manual_tree.insert("","end",values=(item["description"],item["quantity"],f'{price:,.2f}',f'{subtotal:,.2f}',f'{rate:g}',f'{vat:,.2f}',f'{total:,.2f}',f'{debit:,.2f}',f'{credit:,.2f}'))
         self.item_description.set(""); self.item_quantity.set("1"); self.item_price.set("0"); self.item_subtotal.set("0.00")
         self.item_vat_rate.set("11"); self.item_vat.set("0.00"); self.item_total.set("0.00")
@@ -645,26 +664,34 @@ class SaberApp(tk.Tk):
         if hasattr(self,"manual_exchange"):
             self.manual_exchange.config(text=self.exchange_equivalent_text(total,self.manual_currency.get()))
 
+    def manual_type_changed(self):
+        if self.manual_kind.get()=="expense_without_vat":
+            self.item_vat_rate.set("0"); self.item_vat.set("0.00"); self.vat_override.set(False)
+        elif self.item_vat_rate.get()=="0": self.item_vat_rate.set("11")
+        self.calculate_manual_line(); self.update_manual_totals()
+
+    def exchange_equivalents(self,amount,currency,rates):
+        def convert(value,source,target):
+            if source==target: return value
+            for row in rates:
+                rate=float(row["rate"])
+                if row["from_currency"]==source and row["to_currency"]==target: return value*rate
+                if row["from_currency"]==target and row["to_currency"]==source and rate: return value/rate
+            return None
+        if currency=="LBP": return amount,convert(amount,"LBP","USD")
+        lbp=convert(amount,currency,"LBP"); usd=amount if currency=="USD" else convert(amount,currency,"USD")
+        if usd is None and lbp is not None: usd=convert(lbp,"LBP","USD")
+        if lbp is None and usd is not None: lbp=convert(usd,"USD","LBP")
+        return lbp,usd
+
     def exchange_equivalent_text(self, amount, currency):
         if not amount:
             return "Exchange equivalent: 0.00"
         try: rates=self.client.exchange_rates()
         except Exception: rates=[]
-        def convert(value, source, target):
-            if source==target: return value
-            for row in rates:
-                if row["from_currency"]==source and row["to_currency"]==target:
-                    return value*float(row["rate"])
-                if row["from_currency"]==target and row["to_currency"]==source and float(row["rate"]):
-                    return value/float(row["rate"])
-            return None
+        lbp,usd=self.exchange_equivalents(amount,currency,rates)
         if currency=="LBP":
-            usd=convert(amount,"LBP","USD")
             return f"Exchange equivalent: USD {usd:,.2f}" if usd is not None else "Exchange equivalent: USD rate not entered"
-        lbp=convert(amount,currency,"LBP")
-        usd=convert(amount,currency,"USD")
-        if usd is None and lbp is not None: usd=convert(lbp,"LBP","USD")
-        if lbp is None and usd is not None: lbp=convert(usd,"USD","LBP")
         lbp_text=f"LBP {lbp:,.2f}" if lbp is not None else "LBP rate not entered"
         usd_text=f"USD {usd:,.2f}" if usd is not None else "USD rate not entered"
         return f"Exchange equivalent: {lbp_text}   |   {usd_text}"
@@ -678,11 +705,11 @@ class SaberApp(tk.Tk):
         title=f"Invoice {invoice_no} - {party} - {currency}"
         headers=["Description","Quantity","Unit Price","Before VAT","VAT %","VAT Amount","After VAT","Debit","Credit"]
         rows=[[item["description"],item["quantity"],item["unit_price"],item["subtotal"],item["vat_rate"],item["vat"],item["total"],
-               item["total"] if self.manual_kind.get()=="sale" else 0,item["total"] if self.manual_kind.get()=="purchase" else 0] for item in self.manual_items]
+               item["total"] if self.manual_kind.get()=="sale" else 0,item["total"] if self.manual_kind.get()!="sale" else 0] for item in self.manual_items]
         total_amount=sum(float(item["total"]) for item in self.manual_items)
         rows.append(["","",f"TOTAL {currency}",sum(float(item["subtotal"]) for item in self.manual_items),
                      "",sum(float(item["vat"]) for item in self.manual_items),total_amount,
-                     total_amount if self.manual_kind.get()=="sale" else 0,total_amount if self.manual_kind.get()=="purchase" else 0])
+                     total_amount if self.manual_kind.get()=="sale" else 0,total_amount if self.manual_kind.get()!="sale" else 0])
         try:
             if format_name=="print":
                 print_rows(title,headers,rows); return
@@ -700,8 +727,8 @@ class SaberApp(tk.Tk):
         invoice={"invoice_number":self.manual_no.get().strip(),"invoice_date":self.manual_date.get().strip(),
                  "party_name":self.manual_party.get().strip(),"kind":self.manual_kind.get(),"currency":self.manual_currency.get(),
                  "supplier_account":self.manual_supplier_account.get().strip() or "4011",
-                 "vat_account":self.manual_vat_account.get().strip() or "4426.6",
-                 "expense_account":self.manual_expense_account.get().strip() or "6011",
+                 "vat_account":self.manual_vat_account.get().strip() or "442660000",
+                 "expense_account":self.manual_expense_account.get().strip() or "601100000",
                  "source_file":"Journal Voucher","source_row":None}
         if not all((invoice["invoice_date"],invoice["party_name"])):
             return messagebox.showwarning("Manual Entry","Enter date and customer/supplier; invoice number can be automatic")
@@ -813,7 +840,7 @@ class SaberApp(tk.Tk):
 
     def expense_dialog(self):
         window=tk.Toplevel(self); window.title("Add Expense"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
-        defaults={"expense_date":datetime.now().strftime("%d-%m-%Y"),"description":"","category":"General","currency":"USD","subtotal":"0","vat":"0","expense_account":"6011","vat_account":"4426.6","payment_account":"531","reference":""}
+        defaults={"expense_date":datetime.now().strftime("%d-%m-%Y"),"description":"","category":"General","currency":"USD","subtotal":"0","vat":"0","expense_account":"601100000","vat_account":"442660000","payment_account":"531","reference":""}
         values={key:tk.StringVar(value=value) for key,value in defaults.items()}
         labels=[("Date","expense_date"),("Description","description"),("Category","category"),("Currency","currency"),("Before VAT","subtotal"),("VAT","vat"),("Expense Account (D - Debit)","expense_account"),("VAT Account (D - Debit)","vat_account"),("Cash / Bank Account (C - Credit)","payment_account"),("Reference","reference")]
         for index,(label,key) in enumerate(labels):
@@ -1116,13 +1143,24 @@ class SaberApp(tk.Tk):
 
     def build_accounts(self):
         controls=tk.Frame(self.accounts_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=(10,0))
-        tk.Label(controls,text="Official Lebanese PCGL - Classes 1 to 7",bg=LIGHT,
-                 font=("Segoe UI",11,"bold"),fg=NAVY).pack(side="left")
+        self.new_account_code=tk.StringVar(); self.new_account_name=tk.StringVar(); self.new_account_parent=tk.StringVar(); self.new_account_type=tk.StringVar(value="expense")
+        tk.Label(controls,text="New 9-digit account:",bg=LIGHT,font=("Segoe UI",10,"bold"),fg=NAVY).pack(side="left",padx=(0,4))
+        tk.Entry(controls,textvariable=self.new_account_code,width=11).pack(side="left",padx=3)
+        tk.Entry(controls,textvariable=self.new_account_name,width=22).pack(side="left",padx=3)
+        tk.Entry(controls,textvariable=self.new_account_parent,width=9).pack(side="left",padx=3)
+        ttk.Combobox(controls,textvariable=self.new_account_type,values=["asset","liability","equity","income","expense"],state="readonly",width=9).pack(side="left",padx=3)
+        self.action_button(controls,"Create / Update Account",self.save_new_account).pack(side="left",padx=5)
         self.action_button(controls,tr(self.language.get(),"refresh"),self.load_accounts).pack(side="right")
         self.accounts_tree=self.table(self.accounts_tab,[
             ("code","Account",100),("parent","Parent",80),("english","English",270),
             ("french","French",270),("arabic","Arabic",270),("type","Type",90)])
         self.load_accounts()
+
+    def save_new_account(self):
+        try: self.client.save_account({"code":self.new_account_code.get(),"name_en":self.new_account_name.get(),"parent_code":self.new_account_parent.get(),"type":self.new_account_type.get()})
+        except Exception as exc: return messagebox.showerror("Chart of Accounts",str(exc))
+        self.new_account_code.set(""); self.new_account_name.set(""); self.new_account_parent.set(""); self.load_accounts()
+        messagebox.showinfo("Chart of Accounts","9-digit account saved successfully")
 
     def load_accounts(self):
         try:
@@ -1139,13 +1177,14 @@ class SaberApp(tk.Tk):
         users=tk.Frame(nested,bg=LIGHT); backups=tk.Frame(nested,bg=LIGHT); rates=tk.Frame(nested,bg=LIGHT); general=tk.Frame(nested,bg=LIGHT)
         nested.add(users,text="Users & Permissions"); nested.add(backups,text="Backup & Restore"); nested.add(rates,text="Exchange Rates"); nested.add(general,text="General Settings")
         user_controls=tk.Frame(users,bg=LIGHT); user_controls.pack(fill="x",padx=10,pady=10)
-        self.user_name=tk.StringVar(); self.user_password=tk.StringVar(); self.user_role=tk.StringVar(value="viewer"); self.user_language=tk.StringVar(value="en")
+        self.user_name=tk.StringVar(); self.user_password=tk.StringVar(); self.user_role=tk.StringVar(value="viewer"); self.user_language=tk.StringVar(value="en"); self.edit_user_id=None
         for label,var,width in (("Username",self.user_name,16),("Password",self.user_password,16)):
             tk.Label(user_controls,text=label,bg=LIGHT).pack(side="left",padx=(4,2)); tk.Entry(user_controls,textvariable=var,width=width,show="*" if label=="Password" else "").pack(side="left",padx=4)
         ttk.Combobox(user_controls,textvariable=self.user_role,values=["admin","accountant","viewer"],state="readonly",width=11).pack(side="left",padx=4)
         ttk.Combobox(user_controls,textvariable=self.user_language,values=["en","ar","fr"],state="readonly",width=6).pack(side="left",padx=4)
-        self.action_button(user_controls,"Add User",self.add_user).pack(side="left",padx=5)
+        self.action_button(user_controls,"Create / Update User",self.add_user).pack(side="left",padx=5)
         self.users_tree=self.table(users,[("id","ID",60),("username","Username",200),("role","Role",120),("language","Language",90),("active","Active",80)])
+        self.users_tree.bind("<Double-1>",lambda _event:self.edit_selected_user())
         backup_controls=tk.Frame(backups,bg=LIGHT); backup_controls.pack(fill="x",padx=10,pady=10)
         self.action_button(backup_controls,"Create Backup Now",self.create_backup).pack(side="left",padx=4)
         tk.Button(backup_controls,text="Restore Selected",command=self.restore_selected_backup,bg="#8B1E1E",fg="white",border=0,padx=15,pady=7).pack(side="left",padx=4)
@@ -1183,9 +1222,15 @@ class SaberApp(tk.Tk):
         for row in backups: self.backups_tree.insert("","end",iid=row["name"],values=(row["name"],f'{row["size"]/1024/1024:,.2f} MB',row["modified"][:19]))
 
     def add_user(self):
-        try: self.client.save_user({"username":self.user_name.get(),"password":self.user_password.get(),"role":self.user_role.get(),"language":self.user_language.get(),"active":True})
+        try: self.client.save_user({"id":self.edit_user_id,"username":self.user_name.get(),"password":self.user_password.get(),"role":self.user_role.get(),"language":self.user_language.get(),"active":True})
         except Exception as exc: return messagebox.showerror("Users",str(exc))
-        self.user_name.set(""); self.user_password.set(""); self.load_settings_pages(); messagebox.showinfo("Users","User saved successfully")
+        self.edit_user_id=None; self.user_name.set(""); self.user_password.set(""); self.load_settings_pages(); messagebox.showinfo("Users","User saved successfully")
+
+    def edit_selected_user(self):
+        selected=self.users_tree.selection()
+        if not selected: return
+        values=self.users_tree.item(selected[0],"values"); self.edit_user_id=int(values[0])
+        self.user_name.set(values[1]); self.user_role.set(values[2]); self.user_language.set(values[3]); self.user_password.set("")
 
     def create_backup(self):
         try: result=self.client.create_backup()
