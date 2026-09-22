@@ -189,7 +189,8 @@ class SaberAccountingTest(unittest.TestCase):
             db.save_settings({"base_currency":"EUR","backup_interval_hours":"12"},admin["id"])
             self.assertEqual(db.settings()["base_currency"],"EUR")
             db.save_exchange_rate({"rate_date":"22-09-2026","from_currency":"USD","to_currency":"LBP","rate":"89500"},admin["id"])
-            self.assertEqual(db.list_exchange_rates()[0]["rate"],89500.0)
+            rates=db.list_exchange_rates(); fixed=next(row for row in rates if row["from_currency"]=="USD" and row["to_currency"]=="LBP")
+            self.assertEqual(fixed["rate"],89500.0)
             backup=db.backup(); self.assertTrue(Path(backup).exists()); self.assertTrue(db.list_backups())
             invoice_id=db.create_manual_invoice({"invoice_number":"","invoice_date":"22-09-2026","party_name":"Client","kind":"sale","currency":"USD","due_date":"01-09-2026"},
                 [{"description":"Audit service","quantity":1,"unit_price":100,"vat_rate":11}],admin["id"])
@@ -275,7 +276,7 @@ class SaberAccountingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"lebanese.db"); db.initialize("secret")
             accounts=db.list_accounts()
-            self.assertEqual(len(accounts),len(LEBANESE_ACCOUNTS)+2)
+            self.assertEqual(len(accounts),len(LEBANESE_ACCOUNTS)+3)
             codes={row["code"] for row in accounts}
             self.assertTrue({"1","2","3","4","5","6","7","4011","4111","4426.6","4427","6011","713"}.issubset(codes))
             self.assertFalse({"1100","2100","2200","1300","4100","5100","9999"} & codes)
@@ -310,15 +311,17 @@ class SaberAccountingTest(unittest.TestCase):
             db.save_account({"code":"601100123","name_en":"Consulting expense","type":"expense","parent_code":"6011"},user["id"])
             self.assertIn("601100123",{row["code"] for row in db.list_accounts()})
             invoice_id=db.import_invoice({"invoice_number":"NV-1","invoice_date":"22-09-2026","party_name":"Supplier NV",
-                "kind":"expense_without_vat","entry_type":"expense_without_vat","currency":"USD","subtotal":100,"vat":11,"total":111},user["id"])
+                "kind":"expenses","entry_type":"expenses","currency":"USD","subtotal":100,"vat":0,"total":100},user["id"])
             saved=next(row for row in db.list_invoices() if row["id"]==invoice_id)
             self.assertEqual(saved["vat"],"0"); self.assertEqual(saved["total"],"100")
-            self.assertEqual(saved["expense_account"],"601100000"); self.assertEqual(saved["vat_account"],"442660000")
+            self.assertEqual(saved["expense_account"],"601100000"); self.assertEqual(saved["expense_no_vat_account"],"601100001"); self.assertEqual(saved["vat_account"],"442660000")
             changed=db.update_invoice(invoice_id,{"invoice_number":"NV-1","invoice_date":"22-09-2026","party_name":"Supplier NV",
                 "kind":"assets","entry_type":"assets","currency":"USD","subtotal":100,"vat":0,"total":100,"debit":75,"credit":25,
-                "supplier_account":saved["supplier_account"],"vat_account":saved["vat_account"],"expense_account":"601100123","status":"posted"},user["id"])
+                "supplier_account":saved["supplier_account"],"vat_account":saved["vat_account"],"expense_account":"601100123","expense_no_vat_account":"601100001",
+                "supplier_side":"D - Debit","vat_side":"C - Credit","expense_side":"C - Credit","status":"posted"},user["id"])
             listed=next(row for row in db.list_invoices() if row["id"]==invoice_id)
             self.assertEqual(changed["entry_type"],"assets"); self.assertEqual(listed["debit"],75); self.assertEqual(listed["credit"],25)
+            self.assertEqual(listed["supplier_side"],"D"); self.assertEqual(listed["vat_side"],"C"); self.assertEqual(listed["expense_side"],"C")
 
     def test_update_specific_invoice_row(self):
         with tempfile.TemporaryDirectory() as folder:
