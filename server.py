@@ -248,7 +248,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(201,{"attachment_id":attachment_id})
         if path == "/api/fiscal-years/close":
             if user["role"] != "admin": return self._json(403,{"error":"Administrator permission required"})
-            try: result=self.db.close_fiscal_year(body.get("year"),user["id"])
+            try:
+                company_id=self.headers.get("X-Company-ID")
+                if not company_id: raise ValueError("Select a company before closing the fiscal year")
+                result=self.company_manager.close_and_open_year(company_id,body.get("year"),user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(200,result)
         if path == "/api/invoices/manual":

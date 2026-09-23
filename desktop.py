@@ -27,6 +27,18 @@ def row_matches_search(values, query):
     searchable = " ".join("" if value is None else str(value) for value in values).casefold()
     return all(term in searchable for term in terms)
 
+def sortable_date(value):
+    text=str(value or "").strip()
+    for pattern in ("%d-%m-%Y","%Y-%m-%d"):
+        try: return datetime.strptime(text,pattern)
+        except ValueError: pass
+    return datetime.min
+
+def natural_sort_value(value):
+    text=str(value or "").strip()
+    try: return (0,float(text.replace(",","")))
+    except ValueError: return (1,text.casefold())
+
 class SaberApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -46,6 +58,7 @@ class SaberApp(tk.Tk):
         self.trial_to_date = tk.StringVar()
         self.trial_account = tk.StringVar(); self.trial_account_from=tk.StringVar(); self.trial_account_to=tk.StringVar(); self.trial_scope=tk.StringVar(value="Detailed Trial Balance"); self.trial_display_currency=tk.StringVar(value="USD + LBP")
         self.invoice_account_search=tk.StringVar()
+        self.invoice_sort_by=tk.StringVar(value="Date"); self.invoice_sort_order=tk.StringVar(value="Descending")
         self.invoice_branch=tk.StringVar(value="All Branches"); self.manual_branch=tk.StringVar(value="Head Office"); self.trial_branch=tk.StringVar(value="All Branches"); self.statement_branch=tk.StringVar(value="All Branches")
         self.statement_party = tk.StringVar()
         self.statement_from_date = tk.StringVar()
@@ -55,6 +68,7 @@ class SaberApp(tk.Tk):
         self.statement_include_opening = tk.BooleanVar(value=True)
         self.journal_from_date = tk.StringVar()
         self.journal_to_date = tk.StringVar()
+        self.journal_sort_by=tk.StringVar(value="Date"); self.journal_sort_order=tk.StringVar(value="Ascending")
         self.pnl_from_date = tk.StringVar(value=f"01-01-{datetime.now().year}")
         self.pnl_to_date = tk.StringVar(value=f"31-12-{datetime.now().year}")
         self.close_year = tk.StringVar(value=str(datetime.now().year))
@@ -340,6 +354,11 @@ class SaberApp(tk.Tk):
         l=self.language.get(); self.invoice_tree=self.table(self.invoices_tab,[("no",tr(l,"invoice_no"),90),("date",tr(l,"date"),90),("party",tr(l,"party"),150),("branch","Branch",120),("kind","Type",90),("currency",tr(l,"currency"),60),("deductible","Deductible",95),("non_deductible","Non-Deductible",105),("total",tr(l,"total"),90),("payment_method","Payment Method",110),("paid","Paid Amount",100),("lbp","LBP Eq.",105),("usd","USD Eq.",90),("debit","D",80),("credit","C",80)])
         invoice_actions=tk.Frame(self.invoices_tab,bg=LIGHT); invoice_actions.pack(pady=(0,10))
         tk.Label(invoice_actions,text="Branch:",bg=LIGHT).pack(side="left"); self.branch_selector(invoice_actions,self.invoice_branch,15,True).pack(side="left",padx=4)
+        tk.Label(invoice_actions,text="Sort By:",bg=LIGHT).pack(side="left",padx=(8,2))
+        ttk.Combobox(invoice_actions,textvariable=self.invoice_sort_by,state="readonly",width=16,
+            values=["Date","Invoice Number","Customer / Supplier","Account","Amount","Currency"]).pack(side="left",padx=2)
+        ttk.Combobox(invoice_actions,textvariable=self.invoice_sort_order,state="readonly",width=10,
+            values=["Ascending","Descending"]).pack(side="left",padx=2)
         tk.Button(invoice_actions,text=tr(l,"refresh"),command=self.load_invoices,bg=NAVY,fg="white",border=0,padx=20,pady=7).pack(side="left",padx=4)
         tk.Button(invoice_actions,text="Save Data",command=self.confirm_invoice_data_saved,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
         tk.Button(invoice_actions,text="Export Excel",command=self.export_invoices_excel,bg=NAVY,fg="white",border=0,padx=18,pady=7).pack(side="left",padx=4)
@@ -366,6 +385,15 @@ class SaberApp(tk.Tk):
         selected=self.view_currency.get()
         rows=[r for r in rows if selected=="All Currencies" or r["currency"]==selected]
         if self.invoice_branch.get()!="All Branches": rows=[r for r in rows if r.get("branch_name")==self.invoice_branch.get()]
+        sort_name=self.invoice_sort_by.get()
+        def invoice_key(row):
+            if sort_name=="Date": return sortable_date(row.get("invoice_date"))
+            if sort_name=="Invoice Number": return natural_sort_value(row.get("invoice_number"))
+            if sort_name=="Customer / Supplier": return str(row.get("party_name") or "").casefold()
+            if sort_name=="Account": return natural_sort_value(row.get("supplier_account"))
+            if sort_name=="Amount": return float(row.get("total") or 0)
+            return str(row.get("currency") or "").casefold()
+        rows.sort(key=invoice_key,reverse=self.invoice_sort_order.get()=="Descending")
         self.invoice_rows={str(r["id"]):r for r in rows}
         self.invoice_tree.delete(*self.invoice_tree.get_children())
         for r in rows:
@@ -1154,6 +1182,11 @@ class SaberApp(tk.Tk):
         tk.Label(filters,text="To Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
         tk.Entry(filters,textvariable=self.journal_to_date,width=13).pack(side="left",padx=(5,10))
         tk.Label(filters,text="DD-MM-YYYY",bg=LIGHT,fg="#5f6b76").pack(side="left",padx=(0,10))
+        tk.Label(filters,text="Sort By:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
+        ttk.Combobox(filters,textvariable=self.journal_sort_by,state="readonly",width=16,
+            values=["Date","Voucher Number","Account Number","Account Name","Customer / Supplier","Debit","Credit","Currency"]).pack(side="left",padx=4)
+        ttk.Combobox(filters,textvariable=self.journal_sort_order,state="readonly",width=10,
+            values=["Ascending","Descending"]).pack(side="left",padx=(0,8))
         tk.Button(filters,text="Apply",command=self.load_journal,bg=GOLD,fg=NAVY,
                   font=("Segoe UI",9,"bold"),border=0,padx=16,pady=6).pack(side="left")
         self.journal_tree=self.table(self.journal_tab,[
@@ -1191,6 +1224,17 @@ class SaberApp(tk.Tk):
         currency=None if self.view_currency.get()=="All Currencies" else self.view_currency.get()
         try: rows=self.client.journal(dates[0],dates[1],currency)
         except Exception as exc: return messagebox.showerror("General Journal",str(exc))
+        sort_name=self.journal_sort_by.get()
+        def journal_key(row):
+            if sort_name=="Date": return sortable_date(row.get("entry_date"))
+            if sort_name=="Voucher Number": return natural_sort_value(row.get("entry_number"))
+            if sort_name=="Account Number": return natural_sort_value(row.get("account_code"))
+            if sort_name=="Account Name": return str(row.get("account_name") or "").casefold()
+            if sort_name=="Customer / Supplier": return str(row.get("party_name") or "").casefold()
+            if sort_name=="Debit": return float(row.get("debit") or 0)
+            if sort_name=="Credit": return float(row.get("credit") or 0)
+            return str(row.get("currency") or "").casefold()
+        rows.sort(key=journal_key,reverse=self.journal_sort_order.get()=="Descending")
         self.journal_rows=rows; self.journal_tree.delete(*self.journal_tree.get_children())
         for row in rows:
             self.journal_tree.insert("","end",values=(row["entry_number"],row["entry_date"],row["description"],
@@ -1295,10 +1339,13 @@ class SaberApp(tk.Tk):
         if not messagebox.askyesno("Close Fiscal Year",warning): return
         try: result=self.client.close_fiscal_year(year)
         except Exception as exc: return messagebox.showerror("Close Fiscal Year",str(exc))
+        self.client.select_company_year(self.current_company["id"],year+1)
+        self.current_company=result.get("company",self.current_company); self.current_fiscal_year=year+1
         self.pnl_from_date.set(f"01-01-{year+1}"); self.pnl_to_date.set(f"31-12-{year+1}"); self.close_year.set(str(year+1))
-        self.load_profit_loss(); self.load_journal(); self.load_trial()
+        vouchers=", ".join(result.get("opening_vouchers",[])) or "No opening balance required"
         summary=" / ".join(f"{code}: {amount:,.2f}" for code,amount in result.get("net_results",{}).items()) or "No P&L activity"
-        messagebox.showinfo("Fiscal Year",f"Year {year} closed successfully.\nYear {year+1} opened.\nNet results: {summary}")
+        self.main_screen()
+        messagebox.showinfo("Fiscal Year",f"Year {year} closed successfully.\nYear {year+1} opened for {self.current_company['name']}.\nOpening Journal Voucher: {vouchers}\nNet results: {summary}")
 
     def build_financial_reports(self):
         controls=tk.Frame(self.reports_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=10)

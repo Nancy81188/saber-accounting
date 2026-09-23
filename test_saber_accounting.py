@@ -6,10 +6,16 @@ from database import Database
 from importer import read_invoices
 from lebanese_accounts import LEBANESE_ACCOUNTS
 from report_export import export_excel, export_invoice_pdf, export_pdf
-from desktop import row_matches_search
+from desktop import natural_sort_value, row_matches_search, sortable_date
 from company_manager import CompanyManager
 
 class SaberAccountingTest(unittest.TestCase):
+    def test_sort_helpers_support_dates_numbers_and_names(self):
+        dates=["31-12-2025","01-01-2026","15-06-2024"]
+        self.assertEqual(sorted(dates,key=sortable_date),["15-06-2024","31-12-2025","01-01-2026"])
+        numbers=["JV-10","2","11","1"]
+        self.assertEqual(sorted(numbers,key=natural_sort_value)[:3],["1","2","11"])
+
     def test_table_search_matches_all_terms_across_columns(self):
         row=("INV-100","22-09-2026","Supplier Alpha","purchase","USD",100,11,111)
         self.assertTrue(row_matches_search(row,"supplier usd"))
@@ -492,6 +498,26 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertTrue(any(p["name"]=="Only In Company Two" for p in db_2027.list_parties()))
             updated=manager.update_company(company["id"],{"name":"Renamed Company","active":False})
             self.assertEqual(updated["name"],"Renamed Company"); self.assertFalse(updated["active"])
+
+    def test_company_closing_creates_new_year_and_opening_journal_voucher(self):
+        with tempfile.TemporaryDirectory() as folder:
+            master=Database(Path(folder)/"master.db"); master.initialize("secret")
+            user=master.user_for_token(master.login("admin","secret")["token"])
+            manager=CompanyManager(Path(folder)/"master.db")
+            company=manager.create_company({"name":"Closing Test","year":2026},master)
+            source=manager.database(company["id"],2026)
+            source.import_invoice({"invoice_number":"S-1","invoice_date":"30-12-2026","party_name":"Client",
+                "kind":"sale","currency":"USD","subtotal":1000,"vat":110,"total":1110},user["id"])
+            result=manager.close_and_open_year(company["id"],2026,user["id"])
+            self.assertEqual(result["opened_year"],2027)
+            self.assertIn("OPEN-2027-USD",result["opening_vouchers"])
+            target=manager.database(company["id"],2027)
+            opening=[row for row in target.journal() if row["source_type"]=="opening"]
+            self.assertTrue(opening)
+            self.assertAlmostEqual(sum(row["debit"] for row in opening),sum(row["credit"] for row in opening),places=2)
+            self.assertEqual(target.profit_and_loss("2027-01-01","2027-12-31","USD"),[])
+            years={int(item["year"]):item["status"] for item in manager._company(company["id"])["years"]}
+            self.assertEqual(years[2026],"closed"); self.assertEqual(years[2027],"open")
 
     def test_opening_display_currency_dc_choices_and_linked_rate(self):
         with tempfile.TemporaryDirectory() as folder:

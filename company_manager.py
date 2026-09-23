@@ -104,9 +104,30 @@ class CompanyManager:
         company["years"].append({"year":year,"database":str(path.resolve()),"status":"open"}); company["years"].sort(key=lambda y:int(y["year"]))
         self._write(data); return company
 
+    def close_and_open_year(self,company_id,year,user_id):
+        """Close one company year, create its next database, and post opening vouchers."""
+        year=int(year); next_year=year+1; data=self._read()
+        company=next((c for c in data["companies"] if c["id"]==company_id),None)
+        if not company: raise KeyError("Company not found")
+        current=next((y for y in company.get("years",[]) if int(y["year"])==year),None)
+        if not current: raise ValueError("Fiscal year not found for this company")
+        if any(int(y["year"])==next_year for y in company.get("years",[])):
+            raise ValueError(f"Fiscal year {next_year} already exists")
+        source=Database(current["database"])
+        close_result=source.close_fiscal_year(year,user_id)
+        current["status"]="closed"
+        path=self.root/company_id/f"{next_year}.db"
+        target=Database(path); target.initialize(secrets.token_urlsafe(24))
+        self._copy_master_data(source,target)
+        opening_vouchers=self._opening_balances(source,target,next_year,user_id)
+        company["years"].append({"year":next_year,"database":str(path.resolve()),"status":"open"})
+        company["years"].sort(key=lambda item:int(item["year"]))
+        self._write(data)
+        return {**close_result,"company":company,"opening_vouchers":opening_vouchers}
+
     def _copy_master_data(self,source,target):
         with source.connect() as src, target.connect() as dst:
-            for table in ("users","accounts","parties","app_settings"):
+            for table in ("users","accounts","parties","branches","app_settings"):
                 rows=src.execute(f"SELECT * FROM {table}").fetchall()
                 if not rows: continue
                 columns=list(rows[0].keys())
@@ -121,10 +142,15 @@ class CompanyManager:
         for row in rows:
             balance=float(row.get("balance") or 0)
             if abs(balance)>=0.005: by_currency.setdefault(row["currency"],[]).append((row["code"],balance))
+        vouchers=[]
         with target.connect() as db:
+            branch=db.execute("SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
             for currency,lines in by_currency.items():
-                entry=db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
-                    (f"OPEN-{year}-{currency}",f"01-01-{year}",f"Opening balances {year}","opening",currency,user_id,utcnow()))
+                number=f"OPEN-{year}-{currency}"
+                entry=db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,currency,created_by,created_at,branch_id) VALUES(?,?,?,?,?,?,?,?)",
+                    (number,f"01-01-{year}",f"Opening balances {year}","opening",currency,user_id,utcnow(),branch["id"] if branch else None))
                 for code,balance in lines:
                     account=db.execute("SELECT id FROM accounts WHERE code=?",(code,)).fetchone()
                     if account: db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",(entry.lastrowid,account["id"],str(max(balance,0)),str(max(-balance,0))))
+                vouchers.append(number)
+        return vouchers
