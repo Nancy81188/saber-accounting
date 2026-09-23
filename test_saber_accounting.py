@@ -269,6 +269,9 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertEqual(asset["account_number"],"401900001"); self.assertEqual(payable["account_number"],"401900002")
             categories={row["name"]:row["account_category"] for row in db.list_parties()}
             self.assertEqual(categories["Client Category"],"client"); self.assertEqual(categories["Asset Supplier Category"],"asset_supplier")
+            auto_asset=db.save_party({"name":"Automatic Asset Supplier","account_category":"asset_supplier","currency":"USD"},user["id"])
+            auto_payable=db.save_party({"name":"Automatic Other Payable","account_category":"other_payable","currency":"USD"},user["id"])
+            self.assertTrue(auto_asset["account_number"].startswith("4031")); self.assertTrue(auto_payable["account_number"].startswith("4619"))
 
     def test_currency_detection_from_excel_number_formats(self):
         with tempfile.TemporaryDirectory() as folder:

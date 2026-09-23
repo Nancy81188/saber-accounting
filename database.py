@@ -324,11 +324,11 @@ class Database:
 
     def _ensure_party_account(self, db, party):
         if party["kind"] not in ("customer","supplier","both"): return None
-        prefix="4111" if party["kind"]=="customer" else "4011"
+        category=(party["account_category"] or ("client" if party["kind"]=="customer" else "supplier")) if "account_category" in party.keys() else ("client" if party["kind"]=="customer" else "supplier")
+        prefix={"client":"4111","supplier":"4011","asset_supplier":"4031","other_payable":"4619"}.get(category,"4011")
         account_number=party["account_number"] or f"{prefix}{party['id']:05d}"
         db.execute("UPDATE parties SET account_number=? WHERE id=?",(account_number,party["id"]))
         parent="4111" if party["kind"]=="customer" else "4011"
-        category=(party["account_category"] or ("client" if party["kind"]=="customer" else "supplier")) if "account_category" in party.keys() else ("client" if party["kind"]=="customer" else "supplier")
         label={"client":"Client","supplier":"Supplier","asset_supplier":"Asset Supplier","other_payable":"Other Payable"}.get(category,"Supplier")
         account_type="asset" if party["kind"]=="customer" else "liability"
         db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code=?))",

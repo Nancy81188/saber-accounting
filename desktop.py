@@ -867,7 +867,9 @@ class SaberApp(tk.Tk):
         header=tk.LabelFrame(self.manual_tab,text="Journal Voucher",bg=LIGHT,padx=10,pady=8); header.pack(fill="x",padx=10,pady=(10,4))
         self.manual_no=tk.StringVar(); self.manual_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y")); self.manual_description=tk.StringVar(); self.manual_currency=tk.StringVar(value="USD")
         for column,(label,var,width) in enumerate((("Voucher Number",self.manual_no,18),("Date",self.manual_date,14),("Description",self.manual_description,32))):
-            tk.Label(header,text=label,bg=LIGHT).grid(row=0,column=column*2,sticky="w",padx=4); tk.Entry(header,textvariable=var,width=width).grid(row=0,column=column*2+1,padx=4)
+            tk.Label(header,text=label,bg=LIGHT).grid(row=0,column=column*2,sticky="w",padx=4)
+            tk.Entry(header,textvariable=var,width=width,state="readonly" if label=="Voucher Number" else "normal").grid(row=0,column=column*2+1,padx=4)
+        tk.Label(header,text="Automatic after Save",bg=LIGHT,fg="#5f6b76",font=("Segoe UI",8)).grid(row=2,column=1,sticky="w",padx=4)
         ttk.Combobox(header,textvariable=self.manual_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=8).grid(row=0,column=6,padx=5)
         tk.Label(header,text="Branch",bg=LIGHT).grid(row=1,column=0,sticky="w",padx=4,pady=(7,0)); self.branch_selector(header,self.manual_branch,22,False).grid(row=1,column=1,padx=4,pady=(7,0))
         self.manual_exchange=tk.Label(header,text="Exchange equivalent: 0.00",bg=LIGHT,fg=NAVY,font=("Segoe UI",9,"bold")); self.manual_exchange.grid(row=1,column=2,columnspan=5,sticky="w",padx=8,pady=(7,0))
@@ -1032,7 +1034,7 @@ class SaberApp(tk.Tk):
         self.action_button(controls,"Save Customer / Supplier",self.save_party).pack(side="left",padx=6)
         self.action_button(controls,"Edit Selected",self.edit_selected_party).pack(side="left",padx=4)
         details=tk.Frame(self.parties_tab,bg=LIGHT); details.pack(fill="x",padx=10,pady=(0,8))
-        for label,var,width in (("Account Prefix (4 digits) or Full 9-Digit Number",self.party_account_number,18),("MOF Number",self.party_mof,18),("Address",self.party_address,28),("Contact Number",self.party_contact,18)):
+        for label,var,width in (("Account Number (blank = automatic; optional 4-digit prefix)",self.party_account_number,18),("MOF Number",self.party_mof,18),("Address",self.party_address,28),("Contact Number",self.party_contact,18)):
             tk.Label(details,text=label,bg=LIGHT).pack(side="left",padx=(5,2)); tk.Entry(details,textvariable=var,width=width).pack(side="left",padx=4)
         self.parties_tree=self.table(self.parties_tab,[("id","ID",55),("account","9-Digit Account",115),("name","Name",180),("kind","Type",85),("tax","Tax Number",110),("mof","MOF Number",110),("address","Address",180),("contact","Contact",110),("currency","Currency",70)])
         self.parties_tree.bind("<Double-1>",lambda _event:self.edit_selected_party())
