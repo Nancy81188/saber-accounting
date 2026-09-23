@@ -326,7 +326,12 @@ class Database:
         if party["kind"] not in ("customer","supplier","both"): return None
         category=(party["account_category"] or ("client" if party["kind"]=="customer" else "supplier")) if "account_category" in party.keys() else ("client" if party["kind"]=="customer" else "supplier")
         prefix={"client":"4111","supplier":"4011","asset_supplier":"4031","other_payable":"4619"}.get(category,"4011")
-        account_number=party["account_number"] or f"{prefix}{party['id']:05d}"
+        account_number=party["account_number"]
+        if not account_number:
+            last=db.execute("SELECT account_number FROM parties WHERE account_number LIKE ? AND length(account_number)=9 ORDER BY CAST(account_number AS INTEGER) DESC LIMIT 1",(prefix+"%",)).fetchone()
+            next_suffix=(int(last["account_number"][4:])+1) if last else 1
+            if next_suffix>99999: raise ValueError(f"No account numbers remain under prefix {prefix}")
+            account_number=f"{prefix}{next_suffix:05d}"
         db.execute("UPDATE parties SET account_number=? WHERE id=?",(account_number,party["id"]))
         parent="4111" if party["kind"]=="customer" else "4011"
         label={"client":"Client","supplier":"Supplier","asset_supplier":"Asset Supplier","other_payable":"Other Payable"}.get(category,"Supplier")
