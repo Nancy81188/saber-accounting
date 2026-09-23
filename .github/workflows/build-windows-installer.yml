@@ -32,7 +32,6 @@ jobs:
       - name: Build standalone applications
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --add-data "assets/Saber_for_Audit_logo.png;assets" --name SaberAccounting run_desktop.py
-          pyinstaller --noconfirm --clean --onefile --name SaberAccountingServer run_server.py
 
       - name: Create Windows installer
         run: iscc installer.iss
