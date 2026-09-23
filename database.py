@@ -28,8 +28,9 @@ CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, user_id INTEGER NOT
 CREATE TABLE IF NOT EXISTS parties (
  id INTEGER PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('customer','supplier','both')),
  name TEXT NOT NULL, tax_number TEXT, mof_number TEXT, address TEXT, contact_number TEXT,
- currency TEXT NOT NULL DEFAULT 'USD', account_number TEXT, UNIQUE(kind,name)
+ currency TEXT NOT NULL DEFAULT 'USD', account_number TEXT, account_category TEXT, UNIQUE(kind,name)
 );
+CREATE TABLE IF NOT EXISTS branches (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS accounts (
  id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name_en TEXT NOT NULL, name_ar TEXT, name_fr TEXT,
  type TEXT NOT NULL CHECK(type IN ('asset','liability','equity','income','expense')), parent_id INTEGER REFERENCES accounts(id), active INTEGER NOT NULL DEFAULT 1
@@ -44,7 +45,7 @@ CREATE TABLE IF NOT EXISTS invoices (
  supplier_side TEXT NOT NULL DEFAULT 'C', vat_side TEXT NOT NULL DEFAULT 'D', expense_side TEXT NOT NULL DEFAULT 'D',
  expense_no_vat_account TEXT NOT NULL DEFAULT '601100001', expense_no_vat_side TEXT NOT NULL DEFAULT 'D',
  source_file TEXT, source_row INTEGER, due_date TEXT, payment_status TEXT NOT NULL DEFAULT 'unpaid',
- amount_paid TEXT NOT NULL DEFAULT '0', payment_method TEXT, cancelled_at TEXT, cancellation_reason TEXT,
+ amount_paid TEXT NOT NULL DEFAULT '0', payment_method TEXT, description TEXT, branch_id INTEGER REFERENCES branches(id), cancelled_at TEXT, cancellation_reason TEXT,
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS invoice_items (
@@ -60,7 +61,7 @@ CREATE TABLE IF NOT EXISTS invoice_attachments (
 );
 CREATE TABLE IF NOT EXISTS journal_entries (
  id INTEGER PRIMARY KEY, entry_number TEXT NOT NULL UNIQUE, entry_date TEXT, description TEXT, source_type TEXT,
- source_id INTEGER, currency TEXT NOT NULL, created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
+ source_id INTEGER, currency TEXT NOT NULL, branch_id INTEGER REFERENCES branches(id), created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS journal_lines (
  id INTEGER PRIMARY KEY, entry_id INTEGER NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
@@ -178,6 +179,8 @@ class Database:
                 "expense_no_vat_side": "TEXT NOT NULL DEFAULT 'D'",
                 "deductible_subtotal": "TEXT NOT NULL DEFAULT '0'",
                 "non_deductible_subtotal": "TEXT NOT NULL DEFAULT '0'",
+                "description": "TEXT",
+                "branch_id": "INTEGER REFERENCES branches(id)",
             }
             for column, definition in lifecycle_columns.items():
                 if column not in invoice_columns:
@@ -187,6 +190,11 @@ class Database:
                 if column not in item_columns: db.execute(f"ALTER TABLE invoice_items ADD COLUMN {column} TEXT NOT NULL DEFAULT '0'")
             journal_line_columns={row["name"] for row in db.execute("PRAGMA table_info(journal_lines)")}
             if "description" not in journal_line_columns: db.execute("ALTER TABLE journal_lines ADD COLUMN description TEXT")
+            journal_columns={row["name"] for row in db.execute("PRAGMA table_info(journal_entries)")}
+            if "branch_id" not in journal_columns: db.execute("ALTER TABLE journal_entries ADD COLUMN branch_id INTEGER REFERENCES branches(id)")
+            db.execute("INSERT OR IGNORE INTO branches(name) VALUES('Head Office')")
+            db.execute("UPDATE invoices SET branch_id=(SELECT id FROM branches WHERE name='Head Office') WHERE branch_id IS NULL")
+            db.execute("UPDATE journal_entries SET branch_id=(SELECT id FROM branches WHERE name='Head Office') WHERE branch_id IS NULL")
             db.execute("UPDATE invoices SET deductible_subtotal=subtotal WHERE CAST(deductible_subtotal AS REAL)=0 AND CAST(non_deductible_subtotal AS REAL)=0 AND CAST(subtotal AS REAL)<>0")
             db.execute("UPDATE invoice_items SET deductible_subtotal=subtotal WHERE CAST(deductible_subtotal AS REAL)=0 AND CAST(non_deductible_subtotal AS REAL)=0 AND CAST(subtotal AS REAL)<>0")
             expense_columns={row["name"] for row in db.execute("PRAGMA table_info(expenses)")}
@@ -198,6 +206,7 @@ class Database:
                 db.execute("ALTER TABLE parties ADD COLUMN account_number TEXT")
             for column in ("mof_number","address","contact_number"):
                 if column not in party_columns: db.execute(f"ALTER TABLE parties ADD COLUMN {column} TEXT")
+            if "account_category" not in party_columns: db.execute("ALTER TABLE parties ADD COLUMN account_category TEXT")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_parties_account_number ON parties(account_number) WHERE account_number IS NOT NULL")
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('base_currency','USD')")
@@ -303,13 +312,24 @@ class Database:
     def _line_for_side(self,code,amount,side):
         return (code,amount,Decimal("0")) if side=="D" else (code,Decimal("0"),amount)
 
+    def _branch_id(self,db,item):
+        value=item.get("branch_id") if isinstance(item,dict) else None
+        if value:
+            row=db.execute("SELECT id FROM branches WHERE id=? AND active=1",(int(value),)).fetchone()
+            if not row: raise ValueError("Branch was not found")
+            return row["id"]
+        name=str(item.get("branch") or "Head Office").strip() if isinstance(item,dict) else "Head Office"
+        db.execute("INSERT OR IGNORE INTO branches(name) VALUES(?)",(name,))
+        return db.execute("SELECT id FROM branches WHERE name=?",(name,)).fetchone()["id"]
+
     def _ensure_party_account(self, db, party):
         if party["kind"] not in ("customer","supplier","both"): return None
         prefix="4111" if party["kind"]=="customer" else "4011"
         account_number=party["account_number"] or f"{prefix}{party['id']:05d}"
         db.execute("UPDATE parties SET account_number=? WHERE id=?",(account_number,party["id"]))
         parent="4111" if party["kind"]=="customer" else "4011"
-        label="Customer" if party["kind"]=="customer" else "Supplier"
+        category=(party["account_category"] or ("client" if party["kind"]=="customer" else "supplier")) if "account_category" in party.keys() else ("client" if party["kind"]=="customer" else "supplier")
+        label={"client":"Client","supplier":"Supplier","asset_supplier":"Asset Supplier","other_payable":"Other Payable"}.get(category,"Supplier")
         account_type="asset" if party["kind"]=="customer" else "liability"
         db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code=?))",
             (account_number,f"{label} - {party['name']}",account_type,parent))
@@ -457,10 +477,11 @@ class Database:
                 supplier_side,vat_side,expense_side,expense_no_vat_account,expense_no_vat_side,
                 item.get("source_file"), item.get("source_row"), due_date, payment_status, str(amount_paid), user_id, utcnow()))
             invoice_id = cur.lastrowid
-            db.execute("UPDATE invoices SET payment_method=? WHERE id=?",(str(item.get("payment_method") or "").strip() or None,invoice_id))
+            branch_id=self._branch_id(db,item)
+            db.execute("UPDATE invoices SET payment_method=?,description=?,branch_id=? WHERE id=?",(str(item.get("payment_method") or "").strip() or None,str(item.get("description") or "").strip() or None,branch_id,invoice_id))
             entry_number = f"INV-{invoice_id}"
-            entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (entry_number, item.get("invoice_date"), f"{entry_type.replace('_',' ').title()} {item['invoice_number']}", "invoice", invoice_id, item.get("currency", "USD"), user_id, utcnow()))
+            entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,branch_id,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (entry_number, item.get("invoice_date"), f"{entry_type.replace('_',' ').title()} {item['invoice_number']}", "invoice", invoice_id, item.get("currency", "USD"),branch_id, user_id, utcnow()))
             if kind == "sale":
                 lines = [(DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"], total, 0), (DEFAULT_LEBANESE_ACCOUNTS["sales"], 0, subtotal), (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"], 0, vat)]
             else:
@@ -581,13 +602,14 @@ class Database:
             normalized.append((code,str(line.get("description") or "").strip(),debit,credit)); total_debit+=debit; total_credit+=credit
         if abs(total_debit-total_credit)>=Decimal("0.005"): raise ValueError(f"Journal Voucher is unbalanced. Debit {total_debit}; Credit {total_credit}; Remaining {abs(total_debit-total_credit)}")
         with self.connect() as db:
+            branch_id=self._branch_id(db,item)
             if entry_id:
                 existing=db.execute("SELECT * FROM journal_entries WHERE id=? AND source_type='journal_voucher'",(int(entry_id),)).fetchone()
                 if not existing: raise KeyError(entry_id)
                 self._assert_period_open(existing["entry_date"]); voucher_number=str(item.get("entry_number") or existing["entry_number"]).strip()
                 duplicate=db.execute("SELECT 1 FROM journal_entries WHERE entry_number=? AND id<>?",(voucher_number,int(entry_id))).fetchone()
                 if duplicate: raise ValueError("Voucher number already exists")
-                db.execute("UPDATE journal_entries SET entry_number=?,entry_date=?,description=?,currency=? WHERE id=?",(voucher_number,date,description,currency,int(entry_id)))
+                db.execute("UPDATE journal_entries SET entry_number=?,entry_date=?,description=?,currency=?,branch_id=? WHERE id=?",(voucher_number,date,description,currency,branch_id,int(entry_id)))
                 db.execute("DELETE FROM journal_lines WHERE entry_id=?",(int(entry_id),)); saved_id=int(entry_id); action="update"
             else:
                 voucher_number=str(item.get("entry_number") or "").strip()
@@ -595,7 +617,7 @@ class Database:
                     year=self._date_year(date); prefix=f"JV-{year}-"; row=db.execute("SELECT entry_number FROM journal_entries WHERE entry_number LIKE ? ORDER BY entry_number DESC LIMIT 1",(prefix+"%",)).fetchone()
                     sequence=int(row["entry_number"].rsplit("-",1)[-1])+1 if row else 1; voucher_number=f"{prefix}{sequence:06d}"
                 if db.execute("SELECT 1 FROM journal_entries WHERE entry_number=?",(voucher_number,)).fetchone(): raise ValueError("Voucher number already exists")
-                saved_id=db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,currency,created_by,created_at) VALUES(?,?,?,?,?,?,?)",(voucher_number,date,description,"journal_voucher",currency,user_id,utcnow())).lastrowid; action="create"
+                saved_id=db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,currency,branch_id,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",(voucher_number,date,description,"journal_voucher",currency,branch_id,user_id,utcnow())).lastrowid; action="create"
             for code,line_description,debit,credit in normalized:
                 account=db.execute("SELECT id FROM accounts WHERE code=?",(code,)).fetchone()
                 if not account: raise ValueError(f"Account {code} was not found")
@@ -668,23 +690,24 @@ class Database:
                 (expense_no_vat_account,"Expenses without VAT","expense"),
             ):
                 db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)", (code, name, account_type))
+            branch_id=self._branch_id(db,item)
             db.execute("""UPDATE invoices SET invoice_number=?,kind=?,invoice_date=?,party_id=?,currency=?,
                 subtotal=?,deductible_subtotal=?,non_deductible_subtotal=?,vat=?,total=?,status=?,supplier_account=?,vat_account=?,expense_account=?,entry_type=?,
-                debit_override=?,credit_override=?,supplier_side=?,vat_side=?,expense_side=?,expense_no_vat_account=?,expense_no_vat_side=?,due_date=?,payment_status=?,amount_paid=?,payment_method=? WHERE id=?""",
+                debit_override=?,credit_override=?,supplier_side=?,vat_side=?,expense_side=?,expense_no_vat_account=?,expense_no_vat_side=?,due_date=?,payment_status=?,amount_paid=?,payment_method=?,description=?,branch_id=? WHERE id=?""",
                 (str(item["invoice_number"]).strip(), kind, str(item["invoice_date"]).strip(), party["id"], currency,
                  str(subtotal),str(deductible),str(non_deductible),str(vat), str(total), status, supplier_account, vat_account, expense_account,
-                 entry_type,str(debit_override),str(credit_override),supplier_side,vat_side,expense_side,expense_no_vat_account,expense_no_vat_side,due_date, payment_status, str(amount_paid),str(item.get("payment_method") or "").strip() or None, invoice_id))
+                 entry_type,str(debit_override),str(credit_override),supplier_side,vat_side,expense_side,expense_no_vat_account,expense_no_vat_side,due_date, payment_status, str(amount_paid),str(item.get("payment_method") or "").strip() or None,str(item.get("description") or "").strip() or None,branch_id, invoice_id))
             entry = db.execute("SELECT id FROM journal_entries WHERE source_type IN ('invoice','journal_voucher') AND source_id=?", (invoice_id,)).fetchone()
             description = f"{entry_type.replace('_',' ').title()} {str(item['invoice_number']).strip()}"
             if entry:
                 entry_id = entry["id"]
                 db.execute("DELETE FROM journal_lines WHERE entry_id=?", (entry_id,))
-                db.execute("UPDATE journal_entries SET entry_date=?,description=?,currency=? WHERE id=?",
-                           (str(item["invoice_date"]).strip(), description, currency, entry_id))
+                db.execute("UPDATE journal_entries SET entry_date=?,description=?,currency=?,branch_id=? WHERE id=?",
+                           (str(item["invoice_date"]).strip(), description, currency,branch_id, entry_id))
             else:
-                created = db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
-                    VALUES(?,?,?,?,?,?,?,?)""", (f"INV-{invoice_id}", str(item["invoice_date"]).strip(), description,
-                    "invoice", invoice_id, currency, user_id, utcnow()))
+                created = db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,branch_id,created_by,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?)""", (f"INV-{invoice_id}", str(item["invoice_date"]).strip(), description,
+                    "invoice", invoice_id, currency,branch_id, user_id, utcnow()))
                 entry_id = created.lastrowid
             if kind == "sale":
                 lines = [(DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"], total, Decimal("0")), (DEFAULT_LEBANESE_ACCOUNTS["sales"], Decimal("0"), subtotal), (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"], Decimal("0"), vat)]
@@ -912,27 +935,55 @@ class Database:
     def list_parties(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute(
-                "SELECT id,kind,name,tax_number,mof_number,address,contact_number,currency,account_number FROM parties ORDER BY name,kind")]
+                "SELECT id,kind,name,tax_number,mof_number,address,contact_number,currency,account_number,COALESCE(account_category,CASE WHEN kind='customer' THEN 'client' ELSE 'supplier' END) account_category FROM parties ORDER BY name,kind")]
+
+    def list_branches(self):
+        with self.connect() as db: return [dict(row) for row in db.execute("SELECT id,name,active FROM branches WHERE active=1 ORDER BY name")]
+
+    def save_branch(self,item,user_id):
+        name=str(item.get("name") or "").strip()
+        if not name: raise ValueError("Branch name is required")
+        with self.connect() as db:
+            db.execute("INSERT INTO branches(name,active) VALUES(?,1) ON CONFLICT(name) DO UPDATE SET active=1",(name,))
+            row=db.execute("SELECT id,name,active FROM branches WHERE name=?",(name,)).fetchone()
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",(user_id,"save","branch",row["id"],json.dumps({"name":name}),utcnow()))
+            return dict(row)
 
     def save_party(self, item, user_id):
-        name=str(item.get("name") or "").strip(); kind=str(item.get("kind") or "").strip().lower()
+        name=str(item.get("name") or "").strip(); category=str(item.get("account_category") or item.get("kind") or "client").strip().lower().replace(" ","_")
+        if category not in ("client","customer","supplier","asset_supplier","other_payable","both"): raise ValueError("Invalid client/supplier account type")
+        kind="customer" if category in ("client","customer") else "both" if category=="both" else "supplier"
+        category="client" if category=="customer" else category
         currency=str(item.get("currency") or "USD").upper(); tax_number=str(item.get("tax_number") or "").strip() or None
         mof_number=str(item.get("mof_number") or "").strip() or None; address=str(item.get("address") or "").strip() or None; contact_number=str(item.get("contact_number") or "").strip() or None
+        requested_account=str(item.get("account_number") or "").strip() or None
+        if requested_account and (not requested_account.isdigit() or len(requested_account) not in (4,9)): raise ValueError("Enter the first 4 digits for automatic numbering, or the full 9-digit account number")
         if not name or kind not in ("customer","supplier","both") or currency not in ("USD","EUR","LBP","AED"):
             raise ValueError("Enter a valid name, type, and currency")
         with self.connect() as db:
+            if requested_account and len(requested_account)==4:
+                prefix=requested_account
+                last=db.execute("SELECT account_number FROM parties WHERE account_number LIKE ? AND length(account_number)=9 ORDER BY CAST(account_number AS INTEGER) DESC LIMIT 1",(prefix+"%",)).fetchone()
+                next_suffix=(int(last["account_number"][4:])+1) if last else 1
+                if next_suffix>99999: raise ValueError(f"No account numbers remain under prefix {prefix}")
+                requested_account=f"{prefix}{next_suffix:05d}"
             party_id=item.get("id")
             if party_id:
                 if not db.execute("SELECT 1 FROM parties WHERE id=?",(int(party_id),)).fetchone(): raise KeyError(party_id)
                 duplicate=db.execute("SELECT 1 FROM parties WHERE kind=? AND name=? AND id<>?",(kind,name,int(party_id))).fetchone()
                 if duplicate: raise ValueError("A customer/supplier with this name and type already exists")
-                db.execute("UPDATE parties SET kind=?,name=?,tax_number=?,mof_number=?,address=?,contact_number=?,currency=? WHERE id=?",(kind,name,tax_number,mof_number,address,contact_number,currency,int(party_id)))
+                if requested_account and db.execute("SELECT 1 FROM parties WHERE account_number=? AND id<>?",(requested_account,int(party_id))).fetchone(): raise ValueError("Account number already exists")
+                db.execute("UPDATE parties SET kind=?,name=?,tax_number=?,mof_number=?,address=?,contact_number=?,currency=?,account_number=COALESCE(?,account_number),account_category=? WHERE id=?",(kind,name,tax_number,mof_number,address,contact_number,currency,requested_account,category,int(party_id)))
                 row=db.execute("SELECT * FROM parties WHERE id=?",(int(party_id),)).fetchone()
             else:
                 db.execute("""INSERT INTO parties(kind,name,tax_number,mof_number,address,contact_number,currency) VALUES(?,?,?,?,?,?,?)
                     ON CONFLICT(kind,name) DO UPDATE SET tax_number=excluded.tax_number,mof_number=excluded.mof_number,address=excluded.address,contact_number=excluded.contact_number,currency=excluded.currency""",
                     (kind,name,tax_number,mof_number,address,contact_number,currency))
                 row=db.execute("SELECT * FROM parties WHERE kind=? AND name=?",(kind,name)).fetchone()
+                db.execute("UPDATE parties SET account_category=? WHERE id=?",(category,row["id"])); row=db.execute("SELECT * FROM parties WHERE id=?",(row["id"],)).fetchone()
+                if requested_account:
+                    if db.execute("SELECT 1 FROM parties WHERE account_number=? AND id<>?",(requested_account,row["id"])).fetchone(): raise ValueError("Account number already exists")
+                    db.execute("UPDATE parties SET account_number=? WHERE id=?",(requested_account,row["id"])); row=db.execute("SELECT * FROM parties WHERE id=?",(row["id"],)).fetchone()
             account_number=self._ensure_party_account(db,row)
             if account_number: row=db.execute("SELECT * FROM parties WHERE id=?",(row["id"],)).fetchone()
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
@@ -1057,7 +1108,10 @@ class Database:
 
     def list_exchange_rates(self):
         loaded=self.settings().get("exchange_history_loaded_through","")
-        if loaded!=datetime.now().date().isoformat(): self.sync_historical_exchange_rates()
+        expected=(datetime.now().date()-datetime(2024,1,1).date()).days+1
+        with self.connect() as db:
+            eur_days=db.execute("SELECT COUNT(DISTINCT rate_date) count FROM exchange_rates WHERE from_currency='EUR' AND to_currency='USD'").fetchone()["count"]
+        if loaded!=datetime.now().date().isoformat() or eur_days<expected: self.sync_historical_exchange_rates()
         self._ensure_automatic_rates()
         with self.connect() as db:
             return [dict(row) for row in db.execute("""SELECT id,rate_date,from_currency,to_currency,CAST(rate AS REAL) rate,created_at
@@ -1113,6 +1167,12 @@ class Database:
             db.execute("INSERT INTO app_settings(key,value) VALUES('exchange_history_loaded_through',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(end.isoformat(),))
         return {"from":start.isoformat(),"to":end.isoformat(),"days":(end-start).days+1,"rates":len(rows)}
 
+    def restore_euro_rates(self):
+        with self.connect() as db:
+            db.execute("DELETE FROM exchange_rates WHERE from_currency='EUR' AND to_currency IN ('USD','LBP')")
+            db.execute("DELETE FROM app_settings WHERE key='exchange_history_loaded_through'")
+        return self.sync_historical_exchange_rates()
+
     def professional_dashboard(self):
         invoice_rows=self.dashboard(); expenses=self.list_expenses()
         metrics={}
@@ -1164,7 +1224,7 @@ class Database:
             if first is not None and second is not None: return amount*first*second
         raise ValueError(f"No exchange rate available for {source} to {target} on {rate_date}")
 
-    def statement_of_account(self, party_id, from_date=None, to_date=None, currency=None, include_opening=True, display_currency=None):
+    def statement_of_account(self, party_id, from_date=None, to_date=None, currency=None, include_opening=True, display_currency=None, branch_id=None):
         normalized_date = """CASE
             WHEN i.invoice_date GLOB '??-??-????'
                 THEN substr(i.invoice_date,7,4)||'-'||substr(i.invoice_date,4,2)||'-'||substr(i.invoice_date,1,2)
@@ -1173,6 +1233,8 @@ class Database:
         parameters = [party_id]
         if currency:
             filters.append("i.currency=?"); parameters.append(currency)
+        if branch_id:
+            filters.append("i.branch_id=?"); parameters.append(int(branch_id))
         if to_date:
             filters.append(f"{normalized_date} <= ?"); parameters.append(to_date)
         with self.connect() as db:
@@ -1180,7 +1242,7 @@ class Database:
             if not party:
                 raise KeyError(party_id)
             rows = [dict(row) for row in db.execute(f"""SELECT i.id,i.invoice_number,i.invoice_date,i.kind,
-                i.currency,i.total FROM invoices i WHERE {' AND '.join(filters)}
+                i.currency,i.total,i.branch_id FROM invoices i WHERE {' AND '.join(filters)}
                 ORDER BY {normalized_date},i.id""", parameters)]
         opening = {}
         items = []
@@ -1216,10 +1278,10 @@ class Database:
                 COALESCE(CAST(i.credit_override AS REAL),CASE WHEN i.kind='purchase' THEN CAST(i.total AS REAL) ELSE 0 END) credit,
                 i.status,i.currency_issue,i.supplier_account,i.vat_account,i.expense_account,i.expense_no_vat_account,
                 i.supplier_side,i.vat_side,i.expense_side,i.expense_no_vat_side,i.source_row,
-                i.due_date,i.payment_status,CAST(i.amount_paid AS REAL) amount_paid,i.payment_method,
+                i.due_date,i.payment_status,CAST(i.amount_paid AS REAL) amount_paid,i.payment_method,i.description,i.branch_id,COALESCE(b.name,'Head Office') branch_name,
                 CAST(i.total AS REAL)-CAST(i.amount_paid AS REAL) outstanding,i.cancelled_at,i.cancellation_reason,
                 (SELECT COUNT(*) FROM invoice_attachments x WHERE x.invoice_id=i.id) attachment_count
-                FROM invoices i LEFT JOIN parties p ON p.id=i.party_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
+                FROM invoices i LEFT JOIN parties p ON p.id=i.party_id LEFT JOIN branches b ON b.id=i.branch_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
 
     def list_accounts(self):
         with self.connect() as db:
@@ -1272,7 +1334,7 @@ class Database:
                 FROM invoices WHERE status!='cancelled' GROUP BY kind,currency""").fetchall()
             return [dict(r) for r in rows]
 
-    def journal(self, from_date=None, to_date=None, currency=None, limit=5000):
+    def journal(self, from_date=None, to_date=None, currency=None, limit=5000, branch_id=None):
         """Return journal lines with a running balance per account and currency."""
         conditions = []
         parameters = []
@@ -1289,14 +1351,16 @@ class Database:
         if currency:
             conditions.append("e.currency = ?")
             parameters.append(currency)
+        if branch_id:
+            conditions.append("e.branch_id=?"); parameters.append(int(branch_id))
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         parameters.append(int(limit))
         with self.connect() as db:
             rows = [dict(row) for row in db.execute(f"""SELECT e.id entry_id,e.entry_number,e.entry_date,
-                e.description,e.source_type,e.source_id,e.currency,a.code account_code,a.name_en account_name,
+                e.description,e.source_type,e.source_id,e.currency,e.branch_id,COALESCE(b.name,'Head Office') branch_name,a.code account_code,a.name_en account_name,
                 COALESCE(p.name,'') party_name,CAST(j.debit AS REAL) debit,CAST(j.credit AS REAL) credit,j.id line_id
                 FROM journal_lines j JOIN journal_entries e ON e.id=j.entry_id
-                JOIN accounts a ON a.id=j.account_id LEFT JOIN parties p ON p.id=j.party_id
+                JOIN accounts a ON a.id=j.account_id LEFT JOIN parties p ON p.id=j.party_id LEFT JOIN branches b ON b.id=e.branch_id
                 {where_clause}
                 ORDER BY {normalized_date},e.id,j.id LIMIT ?""", parameters)]
         balances = {}
@@ -1307,7 +1371,7 @@ class Database:
             row.pop("line_id", None)
         return rows
 
-    def trial_balance(self, from_date=None, to_date=None, account_code=None, include_subaccounts=True, account_from=None, account_to=None):
+    def trial_balance(self, from_date=None, to_date=None, account_code=None, include_subaccounts=True, account_from=None, account_to=None, branch_id=None):
         conditions = []
         parameters = []
         normalized_date = """CASE
@@ -1324,6 +1388,7 @@ class Database:
             conditions.append("CAST(REPLACE(a.code,'.','') AS INTEGER)>=?"); parameters.append(int(''.join(c for c in str(account_from) if c.isdigit())))
         if account_to:
             conditions.append("CAST(REPLACE(a.code,'.','') AS INTEGER)<=?"); parameters.append(int(''.join(c for c in str(account_to) if c.isdigit())))
+        if branch_id: conditions.append("e.branch_id=?"); parameters.append(int(branch_id))
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as db:
             raw=[dict(r) for r in db.execute(f"""SELECT a.code,a.name_en,e.currency,e.entry_date,

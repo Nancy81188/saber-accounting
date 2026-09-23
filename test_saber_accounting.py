@@ -243,6 +243,33 @@ class SaberAccountingTest(unittest.TestCase):
             db.delete_journal_voucher(entry_id,user["id"])
             with self.assertRaises(KeyError): db.journal_voucher_detail(entry_id)
 
+    def test_branches_filter_invoices_vouchers_trial_and_statement(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"branches.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            north=db.save_branch({"name":"North Branch"},user["id"]); south=db.save_branch({"name":"South Branch"},user["id"])
+            invoice_id=db.import_invoice({"invoice_number":"BR-1","invoice_date":"22-09-2026","party_name":"Branch Supplier","kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111,"branch_id":north["id"]},user["id"])
+            invoice=next(row for row in db.list_invoices() if row["id"]==invoice_id)
+            self.assertEqual(invoice["branch_name"],"North Branch")
+            voucher=db.save_journal_voucher({"entry_date":"22-09-2026","description":"South adjustment","currency":"USD","branch_id":south["id"]},[{"account_code":"531","debit":10,"credit":0},{"account_code":"4011","debit":0,"credit":10}],user["id"])
+            self.assertTrue(db.trial_balance(branch_id=north["id"])); self.assertTrue(db.trial_balance(branch_id=south["id"]))
+            self.assertTrue(all(row["branch_id"]==south["id"] for row in db.journal(branch_id=south["id"])))
+            party=next(row for row in db.list_parties() if row["name"]=="Branch Supplier")
+            self.assertEqual(len(db.statement_of_account(party["id"],branch_id=north["id"])["items"]),1)
+            self.assertEqual(len(db.statement_of_account(party["id"],branch_id=south["id"])["items"]),0)
+
+    def test_party_account_categories_and_prefix_sequence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"party-types.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            client=db.save_party({"name":"Client Category","account_category":"client","currency":"USD","account_number":"4119"},user["id"])
+            asset=db.save_party({"name":"Asset Supplier Category","account_category":"asset_supplier","currency":"USD","account_number":"4019"},user["id"])
+            payable=db.save_party({"name":"Other Payable Category","account_category":"other_payable","currency":"USD","account_number":"4019"},user["id"])
+            self.assertEqual(client["account_number"],"411900001")
+            self.assertEqual(asset["account_number"],"401900001"); self.assertEqual(payable["account_number"],"401900002")
+            categories={row["name"]:row["account_category"] for row in db.list_parties()}
+            self.assertEqual(categories["Client Category"],"client"); self.assertEqual(categories["Asset Supplier Category"],"asset_supplier")
+
     def test_currency_detection_from_excel_number_formats(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "formatted-currencies.xlsx"
@@ -319,10 +346,14 @@ class SaberAccountingTest(unittest.TestCase):
             first=db.save_party({"name":"Supplier One","kind":"supplier","currency":"USD"},user["id"])
             second=db.save_party({"name":"Supplier Two","kind":"supplier","currency":"EUR"},user["id"])
             customer=db.save_party({"name":"Customer One","kind":"customer","currency":"USD"},user["id"])
+            prefixed_one=db.save_party({"name":"Other Payable One","kind":"supplier","currency":"USD","account_number":"4999"},user["id"])
+            prefixed_two=db.save_party({"name":"Other Payable Two","kind":"supplier","currency":"USD","account_number":"4999"},user["id"])
             self.assertRegex(first["account_number"],r"^\d{9}$")
             self.assertRegex(second["account_number"],r"^\d{9}$")
             self.assertNotEqual(first["account_number"],second["account_number"])
             self.assertRegex(customer["account_number"],r"^4111\d{5}$")
+            self.assertEqual(prefixed_one["account_number"],"499900001")
+            self.assertEqual(prefixed_two["account_number"],"499900002")
             invoice_id=db.import_invoice({"invoice_number":"AUTO-AC","invoice_date":"22-09-2026",
                 "party_name":"Supplier One","kind":"purchase","currency":"USD","subtotal":100,"vat":11,"total":111},user["id"])
             invoice=next(row for row in db.list_invoices() if row["id"]==invoice_id)

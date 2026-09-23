@@ -48,17 +48,19 @@ class ApiClient:
     def save_account(self,item): return self.request("POST","/api/accounts",item)["account"]
     def rename_account(self,code,name): return self.request("PUT",f"/api/accounts/{code}",{"name_en":name})["account"]
     def parties(self): return self.request("GET", "/api/parties")["items"]
-    def statement(self, party_id, from_date=None, to_date=None, currency=None, include_opening=True, display_currency=None):
+    def branches(self): return self.request("GET","/api/branches")["items"]
+    def save_branch(self,name): return self.request("POST","/api/branches",{"name":name})["branch"]
+    def statement(self, party_id, from_date=None, to_date=None, currency=None, include_opening=True, display_currency=None, branch_id=None):
         query = urlencode({key:value for key,value in {
             "party_id":party_id,"from_date":from_date,"to_date":to_date,"currency":currency,
-            "include_opening":"true" if include_opening else "false","display_currency":display_currency
+            "include_opening":"true" if include_opening else "false","display_currency":display_currency,"branch_id":branch_id
         }.items() if value})
         return self.request("GET", f"/api/statement?{query}")
     def add_invoice_item(self, invoice_id, item):
         return self.request("POST", f"/api/invoices/{invoice_id}/items", {"item":item})["invoice"]
-    def trial_balance(self, from_date=None, to_date=None, account=None, include_subaccounts=True, account_from=None, account_to=None):
+    def trial_balance(self, from_date=None, to_date=None, account=None, include_subaccounts=True, account_from=None, account_to=None, branch_id=None):
         query = urlencode({key: value for key, value in {
-            "from_date": from_date, "to_date": to_date,"account":account,"include_subaccounts":"true" if include_subaccounts else "false","account_from":account_from,"account_to":account_to
+            "from_date": from_date, "to_date": to_date,"account":account,"include_subaccounts":"true" if include_subaccounts else "false","account_from":account_from,"account_to":account_to,"branch_id":branch_id
         }.items() if value})
         path = "/api/trial-balance" + (f"?{query}" if query else "")
         return self.request("GET", path)["items"]
@@ -113,3 +115,4 @@ class ApiClient:
     def save_settings(self,item): return self.request("POST","/api/settings",item)
     def exchange_rates(self): return self.request("GET","/api/exchange-rates")["items"]
     def save_exchange_rate(self,item): return self.request("POST","/api/exchange-rates",item)
+    def restore_euro_rates(self): return self.request("POST","/api/exchange-rates/restore-euro",{})

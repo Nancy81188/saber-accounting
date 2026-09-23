@@ -79,6 +79,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(200, {"items": self.db.list_accounts()})
         if path == "/api/parties":
             return self._json(200, {"items": self.db.list_parties()})
+        if path == "/api/branches": return self._json(200,{"items":self.db.list_branches()})
         if path == "/api/payments": return self._json(200,{"items":self.db.list_payments()})
         if path == "/api/expenses": return self._json(200,{"items":self.db.list_expenses()})
         if path == "/api/statement":
@@ -92,6 +93,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     query.get("currency", [None])[0],
                     query.get("include_opening", ["true"])[0].lower() == "true",
                     query.get("display_currency", [None])[0],
+                    query.get("branch_id",[None])[0],
                 )
             except KeyError:
                 return self._json(404, {"error": "Party not found"})
@@ -115,7 +117,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             to_date = query.get("to_date", [None])[0]
             return self._json(200, {"items": self.db.trial_balance(from_date, to_date,
                 query.get("account",[None])[0],query.get("include_subaccounts",["true"])[0].lower()=="true",
-                query.get("account_from",[None])[0],query.get("account_to",[None])[0])})
+                query.get("account_from",[None])[0],query.get("account_to",[None])[0],query.get("branch_id",[None])[0])})
         if path == "/api/journal":
             query = parse_qs(parsed.query)
             return self._json(200, {"items": self.db.journal(
@@ -173,6 +175,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             try: result=self.db.save_party(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"party":result})
+        if path == "/api/branches":
+            try: result=self.db.save_branch(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"branch":result})
         if path == "/api/accounts":
             try: account=self.db.save_account(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
@@ -199,6 +205,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             try: self.db.save_exchange_rate(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"saved":True})
+        if path == "/api/exchange-rates/restore-euro":
+            try: result=self.db.restore_euro_rates()
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
         if path == "/api/payments":
             try: payment_id=self.db.add_payment(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
