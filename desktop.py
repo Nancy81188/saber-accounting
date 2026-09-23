@@ -62,7 +62,9 @@ class SaberApp(tk.Tk):
         self.report_to_date = tk.StringVar(value=f"31-12-{datetime.now().year}")
         self.ledger_account = tk.StringVar()
         self.report_account_from=tk.StringVar(); self.report_account_to=tk.StringVar()
+        self.active_account_variable=None
         self._style()
+        self.bind_all("<F2>",self.open_active_account_lookup)
         self.login_screen()
 
     def _style(self):
@@ -922,7 +924,17 @@ class SaberApp(tk.Tk):
         return debit,credit
 
     def new_manual_voucher(self):
-        self.editing_voucher_id=None; self.manual_no.set(""); self.manual_date.set(datetime.now().strftime("%d-%m-%Y")); self.manual_description.set(""); self.manual_currency.set("USD"); self.manual_items=[]; self.manual_tree.delete(*self.manual_tree.get_children()); self.update_manual_totals()
+        self.editing_voucher_id=None; self.manual_no.set(""); self.manual_date.set(datetime.now().strftime("%d-%m-%Y")); self.manual_description.set(""); self.manual_currency.set("USD"); self.manual_items=[]; self.manual_tree.delete(*self.manual_tree.get_children()); self.update_manual_totals(); self.set_next_manual_voucher_number()
+
+    def set_next_manual_voucher_number(self):
+        if not hasattr(self,"manual_no") or self.editing_voucher_id: return
+        year=datetime.now().year; prefix=f"JV-{year}-"; sequences=[]
+        for row in getattr(self,"manual_voucher_rows",{}).values():
+            number=str(row.get("number") or "")
+            if number.startswith(prefix):
+                try: sequences.append(int(number.rsplit("-",1)[-1]))
+                except ValueError: pass
+        self.manual_no.set(f"{prefix}{(max(sequences,default=0)+1):06d}")
 
     def save_manual_invoice(self):
         debit,credit=self.update_manual_totals()
@@ -943,7 +955,7 @@ class SaberApp(tk.Tk):
         for row in rows:
             item=grouped.setdefault(row["entry_id"],{"id":row["entry_id"],"number":row["entry_number"],"date":row["entry_date"],"description":row["description"],"branch":row.get("branch_name") or "Head Office","currency":row["currency"],"debit":0.0,"credit":0.0})
             item["debit"]+=float(row["debit"] or 0); item["credit"]+=float(row["credit"] or 0)
-        self.manual_voucher_rows=grouped; self.populate_manual_vouchers()
+        self.manual_voucher_rows=grouped; self.populate_manual_vouchers(); self.set_next_manual_voucher_number()
 
     def populate_manual_vouchers(self):
         if not hasattr(self,"manual_vouchers_tree"): return
@@ -1046,7 +1058,7 @@ class SaberApp(tk.Tk):
     def save_party(self):
         try: saved=self.client.save_party({"id":self.edit_party_id,"name":self.party_name.get(),"account_category":self.party_kind.get(),"account_number":self.party_account_number.get(),"tax_number":self.party_tax.get(),"mof_number":self.party_mof.get(),"address":self.party_address.get(),"contact_number":self.party_contact.get(),"currency":self.party_currency.get()})
         except Exception as exc: return messagebox.showerror("Customers / Suppliers",str(exc))
-        self.new_party_account(); self.load_parties_page(); self.load_statement_parties()
+        self.edit_party_id=saved.get("id"); self.party_account_number.set(saved.get("account_number") or ""); self.load_parties_page(); self.load_statement_parties()
         messagebox.showinfo("Customers / Suppliers",f'Saved successfully\nAutomatic Account Number: {saved.get("account_number") or ""}')
 
     def edit_selected_party(self):
@@ -1729,7 +1741,34 @@ class SaberApp(tk.Tk):
             value=variable.get(); variable.set(value.split(" - ",1)[0].strip() if " - " in value else value.strip())
         box.bind("<KeyRelease>",search); box.bind("<<ComboboxSelected>>",choose); box.bind("<FocusOut>",choose)
         box.bind("<Button-1>",lambda _event: box.after_idle(lambda: box.event_generate("<Down>")))
+        box.bind("<FocusIn>",lambda _event:setattr(self,"active_account_variable",variable))
         return box
+
+    def open_active_account_lookup(self,event=None):
+        if self.active_account_variable is not None: self.open_account_lookup(self.active_account_variable)
+        return "break"
+
+    def open_account_lookup(self,variable):
+        try: accounts=self.client.accounts()
+        except Exception as exc: return messagebox.showerror("Account Search",str(exc))
+        window=tk.Toplevel(self); window.title("Account Search - F2"); window.geometry("700x500"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
+        search_var=tk.StringVar(); top=tk.Frame(window,bg=LIGHT); top.pack(fill="x",padx=10,pady=10)
+        tk.Label(top,text="Search by Account Number or Name:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
+        entry=tk.Entry(top,textvariable=search_var,width=42); entry.pack(side="left",padx=8); entry.focus_set()
+        frame=tk.Frame(window,bg=LIGHT); frame.pack(fill="both",expand=True,padx=10,pady=(0,10))
+        tree=ttk.Treeview(frame,columns=("code","name","type"),show="headings"); tree.heading("code",text="Account Number"); tree.heading("name",text="Account Name"); tree.heading("type",text="Type"); tree.column("code",width=150); tree.column("name",width=350); tree.column("type",width=120)
+        scroll=ttk.Scrollbar(frame,orient="vertical",command=tree.yview); tree.configure(yscrollcommand=scroll.set); tree.pack(side="left",fill="both",expand=True); scroll.pack(side="right",fill="y")
+        def populate(*_args):
+            tree.delete(*tree.get_children()); typed=search_var.get().strip().casefold()
+            for row in accounts:
+                text=f'{row["code"]} {row["name_en"]}'.casefold()
+                if not typed or typed in text: tree.insert("","end",values=(row["code"],row["name_en"],row["type"]))
+        def select(_event=None):
+            selected=tree.selection()
+            if not selected: return
+            values=tree.item(selected[0],"values"); variable.set(str(values[0])); window.destroy()
+        search_var.trace_add("write",populate); tree.bind("<Double-1>",select); tree.bind("<Return>",select); entry.bind("<Return>",lambda _event:(tree.selection_set(tree.get_children()[0]),select()) if tree.get_children() else None)
+        tk.Label(window,text="Double-click an account or press Enter to select",bg=LIGHT,fg="#5f6b76").pack(pady=(0,8)); populate()
 
     def branch_selector(self,parent,variable,width=18,include_all=False):
         try: branches=self.client.branches() if self.client else []
