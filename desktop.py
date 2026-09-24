@@ -62,6 +62,7 @@ class SaberApp(tk.Tk):
         self.current_user = None
         self.last_activity = time.monotonic()
         self.import_rows = []
+        self.sales_items = []
         self.manual_items = []
         self.view_currency = tk.StringVar(value="All Currencies")
         self.import_view_currency = tk.StringVar(value="All Currencies")
@@ -215,9 +216,9 @@ class SaberApp(tk.Tk):
         tab_nav=tk.Frame(self,bg=LIGHT); tab_nav.pack(fill="x",padx=18,pady=(8,0))
         ttk.Style(self).layout("Tabless.TNotebook.Tab",[])
         notebook=ttk.Notebook(self,style="Tabless.TNotebook"); self.main_notebook=notebook; notebook.pack(fill="both",expand=True,padx=18,pady=(6,16))
-        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.parties_tab=tk.Frame(notebook,bg=LIGHT); self.transactions_tab=tk.Frame(notebook,bg=LIGHT); self.payroll_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.reports_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT); self.settings_tab=tk.Frame(notebook,bg=LIGHT)
-        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text=tr(lang,"manual_entry")); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.parties_tab,text=tr(lang,"customers_suppliers")); notebook.add(self.transactions_tab,text=tr(lang,"payments_expenses")); notebook.add(self.payroll_tab,text="Payroll"); notebook.add(self.journal_tab,text=tr(lang,"general_journal")); notebook.add(self.trial_tab,text=tr(lang,"trial_balance")); notebook.add(self.pnl_tab,text=tr(lang,"profit_loss")); notebook.add(self.reports_tab,text=tr(lang,"financial_reports")); notebook.add(self.statement_tab,text=tr(lang,"statement_account")); notebook.add(self.accounts_tab,text=tr(lang,"chart_accounts")); notebook.add(self.settings_tab,text=tr(lang,"security_backup_rates"))
-        self.main_tab_pages=[self.dashboard_tab,self.invoices_tab,self.manual_tab,self.import_tab,self.parties_tab,self.transactions_tab,self.payroll_tab,self.journal_tab,self.trial_tab,self.pnl_tab,self.reports_tab,self.statement_tab,self.accounts_tab,self.settings_tab]
+        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.sales_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.parties_tab=tk.Frame(notebook,bg=LIGHT); self.transactions_tab=tk.Frame(notebook,bg=LIGHT); self.payroll_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.reports_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT); self.settings_tab=tk.Frame(notebook,bg=LIGHT)
+        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.sales_tab,text="Sales Invoice"); notebook.add(self.manual_tab,text=tr(lang,"manual_entry")); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.parties_tab,text=tr(lang,"customers_suppliers")); notebook.add(self.transactions_tab,text=tr(lang,"payments_expenses")); notebook.add(self.payroll_tab,text="Payroll"); notebook.add(self.journal_tab,text=tr(lang,"general_journal")); notebook.add(self.trial_tab,text=tr(lang,"trial_balance")); notebook.add(self.pnl_tab,text=tr(lang,"profit_loss")); notebook.add(self.reports_tab,text=tr(lang,"financial_reports")); notebook.add(self.statement_tab,text=tr(lang,"statement_account")); notebook.add(self.accounts_tab,text=tr(lang,"chart_accounts")); notebook.add(self.settings_tab,text=tr(lang,"security_backup_rates"))
+        self.main_tab_pages=[self.dashboard_tab,self.invoices_tab,self.sales_tab,self.manual_tab,self.import_tab,self.parties_tab,self.transactions_tab,self.payroll_tab,self.journal_tab,self.trial_tab,self.pnl_tab,self.reports_tab,self.statement_tab,self.accounts_tab,self.settings_tab]
         self.tab_names=[notebook.tab(tab,"text") for tab in notebook.tabs()]
         self.tab_choice=tk.StringVar(value=self.tab_names[0])
         self.tab_buttons=[]
@@ -233,7 +234,7 @@ class SaberApp(tk.Tk):
         tk.Label(filter_bar,text="Show currency:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
         currency_filter=ttk.Combobox(filter_bar,textvariable=self.view_currency,values=["All Currencies","USD","EUR","LBP","AED"],state="readonly",width=16)
         currency_filter.pack(side="left",padx=8); currency_filter.bind("<<ComboboxSelected>>",lambda _event:self.currency_changed())
-        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_parties(); self.build_transactions(); self.build_payroll(); self.build_journal(); self.build_trial(); self.build_profit_loss(); self.build_financial_reports(); self.build_statement(); self.build_accounts(); self.build_settings()
+        self.build_dashboard(); self.build_invoices(); self.build_sales_invoice(); self.build_manual(); self.build_import(); self.build_parties(); self.build_transactions(); self.build_payroll(); self.build_journal(); self.build_trial(); self.build_profit_loss(); self.build_financial_reports(); self.build_statement(); self.build_accounts(); self.build_settings()
 
     def record_activity(self,_event=None): self.last_activity=time.monotonic()
 
@@ -712,28 +713,29 @@ class SaberApp(tk.Tk):
             messagebox.showinfo("Invoices","Item added and invoice totals updated")
         tk.Button(window,text="Add Item",command=save,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=24,pady=8).grid(row=6,column=0,columnspan=2,pady=14)
 
-    def build_manual(self):
-        header=tk.LabelFrame(self.manual_tab,text="Journal Voucher Details",bg=LIGHT,padx=10,pady=8)
+    def build_sales_invoice(self):
+        self.sales_items=[]
+        header=tk.LabelFrame(self.sales_tab,text="Sales Invoice Details",bg=LIGHT,padx=10,pady=8)
         header.pack(fill="x",padx=10,pady=(10,4))
-        self.manual_no=tk.StringVar(); self.manual_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y"))
-        self.manual_party=tk.StringVar(); self.manual_kind=tk.StringVar(value="purchases"); self.manual_currency=tk.StringVar(value="USD")
-        self.manual_supplier_account=tk.StringVar(value="4011")
-        self.manual_vat_account=tk.StringVar(value="442660000")
-        self.manual_expense_account=tk.StringVar(value="601100000")
-        self.manual_expense_no_vat_account=tk.StringVar(value="601100001")
-        self.manual_supplier_side=tk.StringVar(value="C - Credit"); self.manual_vat_side=tk.StringVar(value="D - Debit"); self.manual_expense_side=tk.StringVar(value="D - Debit"); self.manual_expense_no_vat_side=tk.StringVar(value="D - Debit")
-        fields=[("Invoice Number",self.manual_no,16),("Date",self.manual_date,14),("Customer / Supplier",self.manual_party,28)]
+        self.sales_no=tk.StringVar(); self.sales_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y"))
+        self.sales_party=tk.StringVar(); self.sales_kind=tk.StringVar(value="sales"); self.sales_currency=tk.StringVar(value="USD")
+        self.sales_supplier_account=tk.StringVar(value="")
+        self.sales_vat_account=tk.StringVar(value="442700000")
+        self.sales_expense_account=tk.StringVar(value="713100000")
+        self.sales_expense_no_vat_account=tk.StringVar(value="601100001")
+        self.sales_supplier_side=tk.StringVar(value="D - Debit"); self.sales_vat_side=tk.StringVar(value="C - Credit"); self.sales_expense_side=tk.StringVar(value="C - Credit"); self.sales_expense_no_vat_side=tk.StringVar(value="C - Credit")
+        self.sales_due_date=tk.StringVar(); self.sales_payment_method=tk.StringVar(value="Cash"); self.sales_amount_paid=tk.StringVar(value="0"); self.sales_branch=tk.StringVar(value="Head Office")
+        fields=[("Invoice Number",self.sales_no,16),("Date",self.sales_date,14),("Customer / Supplier",self.sales_party,28)]
         for col,(label,var,width) in enumerate(fields):
             tk.Label(header,text=label,bg=LIGHT).grid(row=0,column=col*2,sticky="w",padx=4)
             tk.Entry(header,textvariable=var,width=width).grid(row=0,column=col*2+1,padx=4)
-        manual_type=ttk.Combobox(header,textvariable=self.manual_kind,values=["assets","expenses","purchases","sales"],state="readonly",width=18)
-        manual_type.grid(row=0,column=6,padx=5); manual_type.bind("<<ComboboxSelected>>",lambda _event:self.manual_type_changed())
-        ttk.Combobox(header,textvariable=self.manual_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=8).grid(row=0,column=7,padx=5)
+        sales_type=ttk.Combobox(header,textvariable=self.sales_kind,values=["sales"],state="readonly",width=18)
+        sales_type.grid(row=0,column=6,padx=5); sales_type.bind("<<ComboboxSelected>>",lambda _event:self.sales_type_changed())
+        ttk.Combobox(header,textvariable=self.sales_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=8).grid(row=0,column=7,padx=5)
         account_fields=[
-            ("Supplier Account",self.manual_supplier_account,self.manual_supplier_side),
-            ("VAT Account",self.manual_vat_account,self.manual_vat_side),
-            ("Expense Account",self.manual_expense_account,self.manual_expense_side),
-            ("Expense without VAT",self.manual_expense_no_vat_account,self.manual_expense_no_vat_side),
+            ("Client Account",self.sales_supplier_account,self.sales_supplier_side),
+            ("Output VAT Account",self.sales_vat_account,self.sales_vat_side),
+            ("Sales Revenue Account",self.sales_expense_account,self.sales_expense_side),
         ]
         for index,(label,var,side) in enumerate(account_fields):
             rr=1+index//2; cc=(index%2)*4
@@ -742,14 +744,21 @@ class SaberApp(tk.Tk):
             self.account_search_box(box,var,16).pack(side="left")
             if side is not None:
                 side_box=ttk.Combobox(box,textvariable=side,values=["D - Debit","C - Credit"],state="readonly",width=10)
-                side_box.pack(side="left",padx=4); side_box.bind("<<ComboboxSelected>>",lambda _event:self.update_manual_totals())
+                side_box.pack(side="left",padx=4); side_box.bind("<<ComboboxSelected>>",lambda _event:self.update_sales_totals())
 
-        self.manual_exchange=tk.Label(header,text="Exchange equivalent: enter/save rates in Security / Backup / Rates",bg=LIGHT,fg="#5f6b76",anchor="w")
-        self.manual_exchange.grid(row=3,column=0,columnspan=8,sticky="w",padx=4,pady=(8,0))
-        self.manual_currency.trace_add("write",lambda *_args:self.update_manual_totals())
-        self.manual_date.trace_add("write",lambda *_args:self.update_manual_totals())
+        self.sales_exchange=tk.Label(header,text="Exchange equivalent: enter/save rates in Security / Backup / Rates",bg=LIGHT,fg="#5f6b76",anchor="w")
+        self.sales_exchange.grid(row=3,column=0,columnspan=8,sticky="w",padx=4,pady=(8,0))
+        self.sales_currency.trace_add("write",lambda *_args:self.update_sales_totals())
+        self.sales_date.trace_add("write",lambda *_args:self.update_sales_totals())
 
-        editor=tk.LabelFrame(self.manual_tab,text="Add Voucher Line",bg=LIGHT,padx=10,pady=8)
+        payment=tk.Frame(header,bg=LIGHT); payment.grid(row=3,column=0,columnspan=8,sticky="w",padx=4,pady=(8,0))
+        tk.Label(payment,text="Due Date",bg=LIGHT).pack(side="left"); self.date_entry(payment,self.sales_due_date,13).pack(side="left",padx=(4,12))
+        tk.Label(payment,text="Payment Method",bg=LIGHT).pack(side="left"); ttk.Combobox(payment,textvariable=self.sales_payment_method,values=["Cash","Bank Transfer","Cheque","Card","Other"],state="readonly",width=16).pack(side="left",padx=(4,12))
+        tk.Label(payment,text="Amount Paid",bg=LIGHT).pack(side="left"); tk.Entry(payment,textvariable=self.sales_amount_paid,width=12).pack(side="left",padx=(4,12))
+        tk.Label(payment,text="Branch",bg=LIGHT).pack(side="left"); self.branch_selector(payment,self.sales_branch,18,False).pack(side="left",padx=4)
+        self.sales_exchange.grid(row=4,column=0,columnspan=8,sticky="w",padx=4,pady=(8,0))
+
+        editor=tk.LabelFrame(self.sales_tab,text="Sales Invoice Items",bg=LIGHT,padx=10,pady=8)
         editor.pack(fill="x",padx=10,pady=4)
         self.item_description=tk.StringVar(); self.item_quantity=tk.StringVar(value="1"); self.item_price=tk.StringVar(value="0")
         self.item_subtotal=tk.StringVar(value="0.00"); self.item_non_deductible=tk.StringVar(value="0.00"); self.item_vat_rate=tk.StringVar(value="11")
@@ -761,34 +770,35 @@ class SaberApp(tk.Tk):
             tk.Label(editor,text=label,bg=LIGHT).grid(row=0,column=col,sticky="w",padx=3)
             entry=tk.Entry(editor,textvariable=var,width=width)
             entry.grid(row=1,column=col,padx=3,pady=3)
-            entry.bind("<FocusOut>",lambda _event:self.calculate_manual_line())
-        tk.Checkbutton(editor,text="Edit Deductible",variable=self.subtotal_override,command=self.calculate_manual_line,bg=LIGHT).grid(row=2,column=3)
-        tk.Checkbutton(editor,text="Edit VAT amount",variable=self.vat_override,command=self.calculate_manual_line,bg=LIGHT).grid(row=2,column=6)
-        tk.Button(editor,text="Add Item",command=self.add_manual_item,bg=NAVY,fg="white",border=0,padx=16,pady=6).grid(row=1,column=8,padx=8)
+            entry.bind("<FocusOut>",lambda _event:self.calculate_sales_line())
+        tk.Checkbutton(editor,text="Edit Deductible",variable=self.subtotal_override,command=self.calculate_sales_line,bg=LIGHT).grid(row=2,column=3)
+        tk.Checkbutton(editor,text="Edit VAT amount",variable=self.vat_override,command=self.calculate_sales_line,bg=LIGHT).grid(row=2,column=6)
+        tk.Button(editor,text="Add Item",command=self.add_sales_item,bg=NAVY,fg="white",border=0,padx=16,pady=6).grid(row=1,column=8,padx=8)
 
-        self.manual_tree=self.table(self.manual_tab,[("description","Description",220),("quantity","Qty",60),("price","Unit Price",90),
+        self.sales_tree=self.table(self.sales_tab,[("description","Description",220),("quantity","Qty",60),("price","Unit Price",90),
             ("deductible","Deductible",95),("non_deductible","Non-Deductible",105),("rate","VAT %",65),("vat","VAT",85),("total","After VAT",95),("debit","Debit",90),("credit","Credit",90)])
-        actions=tk.Frame(self.manual_tab,bg=LIGHT); actions.pack(pady=(0,10))
-        tk.Button(actions,text="Remove Selected Item",command=self.remove_manual_item,bg="#8B1E1E",fg="white",border=0,padx=14,pady=7).pack(side="left",padx=5)
-        tk.Button(actions,text="Save Journal Voucher",command=self.save_manual_invoice,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=22,pady=7).pack(side="left",padx=5)
-        tk.Button(actions,text="Excel",command=lambda:self.manual_entry_report("xlsx"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
-        tk.Button(actions,text="PDF",command=lambda:self.manual_entry_report("pdf"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
-        tk.Button(actions,text="Print",command=lambda:self.manual_entry_report("print"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
-        self.manual_totals=tk.Label(actions,text="Deductible: 0.00   Non-Deductible: 0.00   VAT: 0.00   Total: 0.00",bg=LIGHT,font=("Segoe UI",10,"bold"))
-        self.manual_totals.pack(side="left",padx=18)
+        actions=tk.Frame(self.sales_tab,bg=LIGHT); actions.pack(pady=(0,10))
+        tk.Button(actions,text="Remove Selected Item",command=self.remove_sales_item,bg="#8B1E1E",fg="white",border=0,padx=14,pady=7).pack(side="left",padx=5)
+        tk.Button(actions,text="Save Draft",command=lambda:self.save_sales_invoice(False),bg=NAVY,fg="white",font=("Segoe UI",10,"bold"),border=0,padx=18,pady=7).pack(side="left",padx=5)
+        tk.Button(actions,text="Save & Post",command=lambda:self.save_sales_invoice(True),bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=18,pady=7).pack(side="left",padx=5)
+        tk.Button(actions,text="Excel",command=lambda:self.sales_entry_report("xlsx"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
+        tk.Button(actions,text="PDF",command=lambda:self.sales_entry_report("pdf"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
+        tk.Button(actions,text="Print",command=lambda:self.sales_entry_report("print"),bg=NAVY,fg="white",border=0,padx=12,pady=7).pack(side="left",padx=3)
+        self.sales_totals=tk.Label(actions,text="Deductible: 0.00   Non-Deductible: 0.00   VAT: 0.00   Total: 0.00",bg=LIGHT,font=("Segoe UI",10,"bold"))
+        self.sales_totals.pack(side="left",padx=18)
 
-    def manual_debit_credit_totals(self):
-        deductible=sum(float(item.get("deductible_subtotal",item["subtotal"])) for item in self.manual_items)
-        non_deductible=sum(float(item.get("non_deductible_subtotal",0)) for item in self.manual_items)
-        vat=sum(float(item.get("vat",0)) for item in self.manual_items); total=deductible+non_deductible+vat
-        if self.manual_kind.get()=="sales": return total,total
+    def sales_debit_credit_totals(self):
+        deductible=sum(float(item.get("deductible_subtotal",item["subtotal"])) for item in self.sales_items)
+        non_deductible=sum(float(item.get("non_deductible_subtotal",0)) for item in self.sales_items)
+        vat=sum(float(item.get("vat",0)) for item in self.sales_items); total=deductible+non_deductible+vat
+        if self.sales_kind.get()=="sales": return total,total
         debit=credit=0.0
-        for amount,side in ((deductible,self.manual_expense_side.get()),(non_deductible,self.manual_expense_no_vat_side.get()),(vat,self.manual_vat_side.get()),(total,self.manual_supplier_side.get())):
+        for amount,side in ((deductible,self.sales_expense_side.get()),(non_deductible,self.sales_expense_no_vat_side.get()),(vat,self.sales_vat_side.get()),(total,self.sales_supplier_side.get())):
             if str(side).upper().startswith("D"): debit+=amount
             else: credit+=amount
         return debit,credit
 
-    def calculate_manual_line(self):
+    def calculate_sales_line(self):
         try:
             quantity=float(self.item_quantity.get() or 0); price=float(self.item_price.get() or 0)
             deductible=float(self.item_subtotal.get() or 0) if self.subtotal_override.get() else quantity*price
@@ -802,8 +812,8 @@ class SaberApp(tk.Tk):
         except ValueError:
             return None
 
-    def add_manual_item(self):
-        calculated=self.calculate_manual_line()
+    def add_sales_item(self):
+        calculated=self.calculate_sales_line()
         if not self.item_description.get().strip(): return messagebox.showwarning("Manual Entry","Enter an item description")
         if calculated is None: return messagebox.showwarning("Manual Entry","Enter valid item amounts")
         try:
@@ -814,31 +824,31 @@ class SaberApp(tk.Tk):
         deductible,non_deductible,vat,total=calculated
         item={"description":self.item_description.get().strip(),"quantity":quantity,"unit_price":price,
               "deductible_subtotal":deductible,"non_deductible_subtotal":non_deductible,"subtotal":deductible+non_deductible,"vat_rate":rate,"vat":vat,"total":total}
-        self.manual_items.append(item)
-        debit=total if self.manual_kind.get()=="sales" else 0
-        credit=total if self.manual_kind.get()!="sales" else 0
-        self.manual_tree.insert("","end",values=(item["description"],item["quantity"],f'{price:,.2f}',f'{deductible:,.2f}',f'{non_deductible:,.2f}',f'{rate:g}',f'{vat:,.2f}',f'{total:,.2f}',f'{debit:,.2f}',f'{credit:,.2f}'))
+        self.sales_items.append(item)
+        debit=total if self.sales_kind.get()=="sales" else 0
+        credit=total if self.sales_kind.get()!="sales" else 0
+        self.sales_tree.insert("","end",values=(item["description"],item["quantity"],f'{price:,.2f}',f'{deductible:,.2f}',f'{non_deductible:,.2f}',f'{rate:g}',f'{vat:,.2f}',f'{total:,.2f}',f'{debit:,.2f}',f'{credit:,.2f}'))
         self.item_description.set(""); self.item_quantity.set("1"); self.item_price.set("0"); self.item_subtotal.set("0.00"); self.item_non_deductible.set("0.00")
         self.item_vat_rate.set("11"); self.item_vat.set("0.00"); self.item_total.set("0.00")
-        self.subtotal_override.set(False); self.vat_override.set(False); self.update_manual_totals()
+        self.subtotal_override.set(False); self.vat_override.set(False); self.update_sales_totals()
 
-    def remove_manual_item(self):
-        selected=self.manual_tree.selection()
+    def remove_sales_item(self):
+        selected=self.sales_tree.selection()
         if not selected: return
-        index=self.manual_tree.index(selected[0]); self.manual_tree.delete(selected[0]); self.manual_items.pop(index); self.update_manual_totals()
+        index=self.sales_tree.index(selected[0]); self.sales_tree.delete(selected[0]); self.sales_items.pop(index); self.update_sales_totals()
 
-    def update_manual_totals(self):
-        deductible=sum(float(item.get("deductible_subtotal",item["subtotal"])) for item in self.manual_items); non_deductible=sum(float(item.get("non_deductible_subtotal",0)) for item in self.manual_items); subtotal=deductible+non_deductible
-        vat=sum(float(item["vat"]) for item in self.manual_items)
+    def update_sales_totals(self):
+        deductible=sum(float(item.get("deductible_subtotal",item["subtotal"])) for item in self.sales_items); non_deductible=sum(float(item.get("non_deductible_subtotal",0)) for item in self.sales_items); subtotal=deductible+non_deductible
+        vat=sum(float(item["vat"]) for item in self.sales_items)
         total=subtotal+vat
-        debit,credit=self.manual_debit_credit_totals(); difference=debit-credit
+        debit,credit=self.sales_debit_credit_totals(); difference=debit-credit
         remaining="Balanced" if abs(difference)<0.005 else (f"Credit needed: {difference:,.2f}" if difference>0 else f"Debit needed: {-difference:,.2f}")
-        self.manual_totals.config(text=f"Total D: {debit:,.2f}   Total C: {credit:,.2f}   Remaining: {remaining}")
-        if hasattr(self,"manual_exchange"):
-            self.manual_exchange.config(text=self.exchange_equivalent_text(total,self.manual_currency.get()))
+        self.sales_totals.config(text=f"Total D: {debit:,.2f}   Total C: {credit:,.2f}   Remaining: {remaining}")
+        if hasattr(self,"sales_exchange"):
+            self.sales_exchange.config(text=self.exchange_equivalent_text(total,self.sales_currency.get()))
 
-    def manual_type_changed(self):
-        self.calculate_manual_line(); self.update_manual_totals()
+    def sales_type_changed(self):
+        self.calculate_sales_line(); self.update_sales_totals()
 
     def exchange_equivalents(self,amount,currency,rates):
         def convert(value,source,target):
@@ -866,20 +876,20 @@ class SaberApp(tk.Tk):
         usd_text=f"USD {usd:,.2f}" if usd is not None else "USD rate not entered"
         return f"Exchange equivalent: {lbp_text}   |   {usd_text}"
 
-    def manual_entry_report(self, format_name):
-        if not self.manual_items:
+    def sales_entry_report(self, format_name):
+        if not self.sales_items:
             return messagebox.showwarning("Manual Entry","Add at least one invoice item")
-        invoice_no=self.manual_no.get().strip() or "Draft"
-        party=self.manual_party.get().strip() or "Unspecified"
-        currency=self.manual_currency.get()
+        invoice_no=self.sales_no.get().strip() or "Draft"
+        party=self.sales_party.get().strip() or "Unspecified"
+        currency=self.sales_currency.get()
         title=f"Invoice {invoice_no} - {party} - {currency}"
         headers=["Description","Quantity","Unit Price","Deductible","Non-Deductible","VAT %","VAT Amount","After VAT","Debit","Credit"]
         rows=[[item["description"],item["quantity"],item["unit_price"],item.get("deductible_subtotal",item["subtotal"]),item.get("non_deductible_subtotal",0),item["vat_rate"],item["vat"],item["total"],
-               item["total"] if self.manual_kind.get()=="sales" else 0,item["total"] if self.manual_kind.get()!="sales" else 0] for item in self.manual_items]
-        total_amount=sum(float(item["total"]) for item in self.manual_items)
-        rows.append(["","",f"TOTAL {currency}",sum(float(item.get("deductible_subtotal",item["subtotal"])) for item in self.manual_items),sum(float(item.get("non_deductible_subtotal",0)) for item in self.manual_items),
-                     "",sum(float(item["vat"]) for item in self.manual_items),total_amount,
-                     total_amount if self.manual_kind.get()=="sales" else 0,total_amount if self.manual_kind.get()!="sales" else 0])
+               item["total"] if self.sales_kind.get()=="sales" else 0,item["total"] if self.sales_kind.get()!="sales" else 0] for item in self.sales_items]
+        total_amount=sum(float(item["total"]) for item in self.sales_items)
+        rows.append(["","",f"TOTAL {currency}",sum(float(item.get("deductible_subtotal",item["subtotal"])) for item in self.sales_items),sum(float(item.get("non_deductible_subtotal",0)) for item in self.sales_items),
+                     "",sum(float(item["vat"]) for item in self.sales_items),total_amount,
+                     total_amount if self.sales_kind.get()=="sales" else 0,total_amount if self.sales_kind.get()!="sales" else 0])
         try:
             if format_name=="print":
                 print_rows(title,headers,rows); return
@@ -893,27 +903,31 @@ class SaberApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Manual Entry",str(exc))
 
-    def save_manual_invoice(self):
-        invoice={"invoice_number":self.manual_no.get().strip(),"invoice_date":self.manual_date.get().strip(),
-                 "party_name":self.manual_party.get().strip(),"kind":self.manual_kind.get(),"currency":self.manual_currency.get(),
-                 "supplier_account":self.manual_supplier_account.get().strip() or "4011",
-                 "vat_account":self.manual_vat_account.get().strip() or "442660000",
-                 "expense_account":self.manual_expense_account.get().strip() or "601100000",
-                 "expense_no_vat_account":self.manual_expense_no_vat_account.get().strip() or "601100001",
-                 "supplier_side":self.manual_supplier_side.get(),"vat_side":self.manual_vat_side.get(),"expense_side":self.manual_expense_side.get(),"expense_no_vat_side":self.manual_expense_no_vat_side.get(),
-                 "source_file":"Journal Voucher","source_row":None}
+    def save_sales_invoice(self,post=False):
+        invoice={"invoice_number":self.sales_no.get().strip(),"invoice_date":self.sales_date.get().strip(),
+                 "party_name":self.sales_party.get().strip(),"kind":self.sales_kind.get(),"currency":self.sales_currency.get(),
+                 "supplier_account":self.sales_supplier_account.get().split(" - ",1)[0].strip(),
+                 "vat_account":self.sales_vat_account.get().split(" - ",1)[0].strip() or "442700000",
+                 "expense_account":self.sales_expense_account.get().split(" - ",1)[0].strip() or "713100000",
+                 "expense_no_vat_account":self.sales_expense_no_vat_account.get().strip() or "601100001",
+                 "supplier_side":self.sales_supplier_side.get(),"vat_side":self.sales_vat_side.get(),"expense_side":self.sales_expense_side.get(),"expense_no_vat_side":self.sales_expense_no_vat_side.get(),
+                 "due_date":self.sales_due_date.get().strip(),"payment_method":self.sales_payment_method.get(),"amount_paid":self.sales_amount_paid.get().strip() or "0",
+                 "branch":self.sales_branch.get(),"status":"posted" if post else "review","source_file":"Sales Invoice","source_row":None}
         if not all((invoice["invoice_date"],invoice["party_name"])):
             return messagebox.showwarning("Manual Entry","Enter date and customer/supplier; invoice number can be automatic")
-        if not self.manual_items: return messagebox.showwarning("Manual Entry","Add at least one invoice item")
-        debit,credit=self.manual_debit_credit_totals()
+        if not self.sales_items: return messagebox.showwarning("Manual Entry","Add at least one invoice item")
+        debit,credit=self.sales_debit_credit_totals()
         if abs(debit-credit)>=0.005:
             needed=f"Credit {debit-credit:,.2f}" if debit>credit else f"Debit {credit-debit:,.2f}"
             return messagebox.showerror("Unbalanced Journal Voucher",f"Total Debit: {debit:,.2f}\nTotal Credit: {credit:,.2f}\nRemaining: {needed}\n\nDebit must equal Credit before saving.")
-        try: self.client.create_manual_invoice(invoice,self.manual_items)
+        try:
+            invoice["invoice_date"]=formatted_user_date(invoice["invoice_date"])
+            if invoice["due_date"]: invoice["due_date"]=formatted_user_date(invoice["due_date"])
+            saved=self.client.create_manual_invoice(invoice,self.sales_items)
         except Exception as exc: return messagebox.showerror("Manual Entry",str(exc))
-        messagebox.showinfo("Manual Entry","Invoice saved successfully")
-        self.manual_items=[]; self.manual_tree.delete(*self.manual_tree.get_children())
-        self.manual_no.set(""); self.manual_party.set(""); self.update_manual_totals()
+        messagebox.showinfo("Sales Invoice",f'Invoice saved as {"Posted" if post else "Draft / Review"}. Number: {self.sales_no.get().strip() or "automatic"}')
+        self.sales_items=[]; self.sales_tree.delete(*self.sales_tree.get_children())
+        self.sales_no.set(""); self.sales_party.set(""); self.update_sales_totals()
         self.load_dashboard(); self.load_invoices(); self.load_journal(); self.load_trial()
 
     # Journal Voucher editor: direct accounting lines (no quantities or unit prices).
