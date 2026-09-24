@@ -55,6 +55,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(401, {"error": "Unauthorized"})
         if path == "/api/companies": return self._json(200,{"items":self.company_manager.list_companies(user["role"]=="admin")})
         self._select_database()
+        if path == "/api/fiscal-year/journal":
+            query=parse_qs(parsed.query)
+            try:
+                company_id=self.headers.get("X-Company-ID"); year=int(query.get("year",[""])[0])
+                if not company_id: raise ValueError("Select a company first")
+                year_db=self.company_manager.database(company_id,year)
+                return self._json(200,{"items":year_db.journal(query.get("from_date",[None])[0],query.get("to_date",[None])[0],query.get("currency",[None])[0]),"year":year,"read_only":True})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
         if path == "/api/invoices":
             return self._json(200, {"items": self.db.list_invoices()})
         if path.startswith("/api/invoices/") and path.endswith("/detail"):
@@ -285,6 +293,22 @@ class ApiHandler(BaseHTTPRequestHandler):
                 company_id=self.headers.get("X-Company-ID")
                 if not company_id: raise ValueError("Select a company before closing the fiscal year")
                 result=self.company_manager.close_and_open_year(company_id,body.get("year"),user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
+        if path == "/api/fiscal-years/reopen":
+            if user["role"] != "admin": return self._json(403,{"error":"Administrator permission required"})
+            try:
+                company_id=self.headers.get("X-Company-ID")
+                if not company_id: raise ValueError("Select a company before reopening the fiscal year")
+                result=self.company_manager.reopen_year(company_id,body.get("year"),user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
+        if path == "/api/fiscal-years/refresh-opening":
+            if user["role"] != "admin": return self._json(403,{"error":"Administrator permission required"})
+            try:
+                company_id=self.headers.get("X-Company-ID")
+                if not company_id: raise ValueError("Select a company first")
+                result=self.company_manager.refresh_opening(company_id,body.get("source_year"),user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(200,result)
         if path == "/api/invoices/manual":

@@ -69,6 +69,7 @@ class SaberApp(tk.Tk):
         self.statement_include_opening = tk.BooleanVar(value=True)
         self.journal_from_date = tk.StringVar()
         self.journal_to_date = tk.StringVar()
+        self.journal_view_year = tk.StringVar()
         self.journal_sort_by=tk.StringVar(value="Date"); self.journal_sort_order=tk.StringVar(value="Ascending")
         self.pnl_from_date = tk.StringVar(value=f"01-01-{datetime.now().year}")
         self.pnl_to_date = tk.StringVar(value=f"31-12-{datetime.now().year}")
@@ -142,7 +143,7 @@ class SaberApp(tk.Tk):
             company=labels.get(company_var.get())
             if not company or not year_var.get(): return messagebox.showwarning("Companies","Select a company and fiscal year")
             if not company.get("active",True): return messagebox.showwarning("Companies","This company is inactive")
-            self.client.select_company_year(company["id"],year_var.get()); self.current_company=company; self.current_fiscal_year=int(year_var.get()); self.main_screen()
+            self.client.select_company_year(company["id"],year_var.get()); self.current_company=company; self.current_fiscal_year=int(year_var.get()); self.journal_view_year.set(str(self.current_fiscal_year)); self.main_screen()
         tk.Button(card,text="Open Company",command=open_company,bg=GOLD,fg=NAVY,font=("Segoe UI",10,"bold"),border=0,padx=25,pady=8).grid(row=3,column=0,columnspan=2,pady=(18,6))
         if self.current_user.get("role")=="admin":
             self.action_button(card,"Create Company",self.create_company_dialog).grid(row=4,column=0,padx=4,pady=5)
@@ -171,11 +172,11 @@ class SaberApp(tk.Tk):
             except Exception as exc: return messagebox.showerror("Company",str(exc),parent=window)
             window.destroy(); self.company_selection_screen()
         def create_year():
-            if not messagebox.askyesno("Fiscal Year","Close the latest year and create the new year with opening balances?",parent=window): return
+            if not messagebox.askyesno("Fiscal Year","Create this fiscal year as a separate open year? The previous year will remain open until you close it manually.",parent=window): return
             try: self.client.create_fiscal_year(company["id"],int(new_year.get()))
             except Exception as exc: return messagebox.showerror("Fiscal Year",str(exc),parent=window)
             window.destroy(); self.company_selection_screen()
-        self.action_button(window,"Save Company",update).grid(row=3,column=0,padx=6,pady=14); self.action_button(window,"Close & Create Year",create_year).grid(row=3,column=1,padx=6,pady=14)
+        self.action_button(window,"Save Company",update).grid(row=3,column=0,padx=6,pady=14); self.action_button(window,"Create Separate Year",create_year).grid(row=3,column=1,padx=6,pady=14)
 
     def main_screen(self):
         self.clear(); lang=self.language.get()
@@ -1297,6 +1298,10 @@ class SaberApp(tk.Tk):
 
     def build_journal(self):
         filters=tk.Frame(self.journal_tab,bg=LIGHT); filters.pack(fill="x",padx=10,pady=(10,0))
+        tk.Label(filters,text="View Year:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
+        years=[str(item["year"]) for item in getattr(self,"current_company",{}).get("years",[])]
+        if not self.journal_view_year.get(): self.journal_view_year.set(str(getattr(self,"current_fiscal_year",datetime.now().year)))
+        ttk.Combobox(filters,textvariable=self.journal_view_year,values=years,state="readonly",width=7).pack(side="left",padx=(4,10))
         tk.Label(filters,text="From Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
         tk.Entry(filters,textvariable=self.journal_from_date,width=13).pack(side="left",padx=(5,14))
         tk.Label(filters,text="To Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
@@ -1342,7 +1347,8 @@ class SaberApp(tk.Tk):
         dates=self.journal_date_range()
         if dates is None: return
         currency=None if self.view_currency.get()=="All Currencies" else self.view_currency.get()
-        try: rows=self.client.journal(dates[0],dates[1],currency)
+        view_year=int(self.journal_view_year.get() or self.current_fiscal_year)
+        try: rows=self.client.journal(dates[0],dates[1],currency) if view_year==int(self.current_fiscal_year) else self.client.fiscal_year_journal(view_year,dates[0],dates[1],currency)
         except Exception as exc: return messagebox.showerror("General Journal",str(exc))
         sort_name=self.journal_sort_by.get()
         def journal_key(row):
@@ -1362,9 +1368,11 @@ class SaberApp(tk.Tk):
                 row["party_name"],f'{row["debit"]:,.2f}',f'{row["credit"]:,.2f}',f'{row["balance"]:,.2f}'))
         debit=sum(float(row["debit"] or 0) for row in rows); credit=sum(float(row["credit"] or 0) for row in rows)
         state="Balanced" if abs(debit-credit)<0.005 else "UNBALANCED"
-        self.journal_totals.config(text=f"Debit: {debit:,.2f}   Credit: {credit:,.2f}   {state}")
+        mode="Current Year" if view_year==int(self.current_fiscal_year) else f"{view_year} Read-Only"
+        self.journal_totals.config(text=f"{mode}   Debit: {debit:,.2f}   Credit: {credit:,.2f}   {state}")
 
     def delete_selected_journal_voucher(self):
+        if int(self.journal_view_year.get() or self.current_fiscal_year)!=int(self.current_fiscal_year): return messagebox.showwarning("General Journal","Previous-year transactions are read-only")
         selected=self.journal_tree.selection()
         if not selected: return messagebox.showwarning("General Journal","Select a Journal Voucher line first")
         entry_number=str(self.journal_tree.item(selected[0],"values")[0])
@@ -1402,6 +1410,8 @@ class SaberApp(tk.Tk):
         tk.Label(controls,text="Close Fiscal Year:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="right",padx=(10,4))
         tk.Entry(controls,textvariable=self.close_year,width=8).pack(side="right")
         tk.Button(controls,text="Close Year & Open Next",command=self.close_fiscal_year,bg="#8B1E1E",fg="white",border=0,padx=14,pady=6).pack(side="right",padx=6)
+        tk.Button(controls,text="Reopen Year",command=self.reopen_fiscal_year,bg=NAVY,fg="white",border=0,padx=12,pady=6).pack(side="right",padx=4)
+        tk.Button(controls,text="Refresh Next-Year Opening",command=self.refresh_next_year_opening,bg=NAVY,fg="white",border=0,padx=12,pady=6).pack(side="right",padx=4)
         self.pnl_tree=self.table(self.pnl_tab,[("currency","Currency",85),("type","Type",90),("account","Account",100),
             ("name","Account Name",300),("debit","Debit",130),("credit","Credit",130),("amount","P&L Amount",140)])
         actions=tk.Frame(self.pnl_tab,bg=LIGHT); actions.pack(pady=(0,10))
@@ -1466,6 +1476,25 @@ class SaberApp(tk.Tk):
         summary=" / ".join(f"{code}: {amount:,.2f}" for code,amount in result.get("net_results",{}).items()) or "No P&L activity"
         self.main_screen()
         messagebox.showinfo("Fiscal Year",f"Year {year} closed successfully.\nYear {year+1} opened for {self.current_company['name']}.\nOpening Journal Voucher: {vouchers}\nNet results: {summary}")
+
+    def reopen_fiscal_year(self):
+        try: year=int(self.close_year.get())
+        except ValueError: return messagebox.showwarning("Fiscal Year","Enter a valid four-digit year")
+        if not messagebox.askyesno("Reopen Fiscal Year",f"Reopen fiscal year {year}?\n\nClosing entries will be removed. If year {year+1} exists, its old opening vouchers will also be removed until you close {year} again."): return
+        try: result=self.client.reopen_fiscal_year(year)
+        except Exception as exc: return messagebox.showerror("Reopen Fiscal Year",str(exc))
+        self.current_company=result.get("company",self.current_company); self.current_fiscal_year=year
+        self.client.select_company_year(self.current_company["id"],year); self.main_screen()
+        messagebox.showinfo("Fiscal Year",f"Fiscal year {year} is open again.\nRemoved closing entries: {result.get('removed_closing_entries',0)}\nRemoved old opening entries: {result.get('removed_opening_entries',0)}")
+
+    def refresh_next_year_opening(self):
+        try: year=int(self.close_year.get())
+        except ValueError: return messagebox.showwarning("Fiscal Year","Enter the source fiscal year")
+        if not messagebox.askyesno("Refresh Opening",f"Replace the opening vouchers in {year+1} using the latest balances from {year}?"): return
+        try: result=self.client.refresh_opening(year)
+        except Exception as exc: return messagebox.showerror("Refresh Opening",str(exc))
+        status="Provisional because the source year is still open" if result.get("provisional") else "Final from a closed source year"
+        messagebox.showinfo("Refresh Opening",f'Opening {year+1} refreshed successfully.\nVouchers: {", ".join(result.get("opening_vouchers",[])) or "No balances"}\n{status}')
 
     def build_financial_reports(self):
         controls=tk.Frame(self.reports_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=10)
@@ -1635,7 +1664,7 @@ class SaberApp(tk.Tk):
     def build_accounts(self):
         controls=tk.Frame(self.accounts_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=(10,0))
         self.new_account_code=tk.StringVar(); self.new_account_name=tk.StringVar(); self.new_account_parent=tk.StringVar(); self.new_account_type=tk.StringVar(value="expense")
-        tk.Label(controls,text="9-digit account (blank = automatic):",bg=LIGHT,font=("Segoe UI",9,"bold"),fg=NAVY).pack(side="left",padx=(0,4))
+        tk.Label(controls,text="Account (4-digit prefix = automatic):",bg=LIGHT,font=("Segoe UI",9,"bold"),fg=NAVY).pack(side="left",padx=(0,4))
         tk.Entry(controls,textvariable=self.new_account_code,width=11).pack(side="left",padx=3)
         tk.Entry(controls,textvariable=self.new_account_name,width=22).pack(side="left",padx=3)
         tk.Entry(controls,textvariable=self.new_account_parent,width=9).pack(side="left",padx=3)
@@ -1898,6 +1927,7 @@ class SaberApp(tk.Tk):
     def account_search_box(self,parent,variable,width=22):
         try: accounts=self.client.accounts() if self.client else []
         except Exception: accounts=[]
+        accounts=[row for row in accounts if len(str(row.get("code") or ""))==9 and str(row.get("code") or "").isdigit()]
         choices=[f'{row["code"]} - {row["name_en"]}' for row in accounts]
         box=ttk.Combobox(parent,textvariable=variable,values=choices,width=width)
         def search(_event=None):
@@ -1918,6 +1948,7 @@ class SaberApp(tk.Tk):
     def open_account_lookup(self,variable):
         try: accounts=self.client.accounts()
         except Exception as exc: return messagebox.showerror("Account Search",str(exc))
+        accounts=[row for row in accounts if len(str(row.get("code") or ""))==9 and str(row.get("code") or "").isdigit()]
         window=tk.Toplevel(self); window.title("Account Search - F2"); window.geometry("700x500"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
         search_var=tk.StringVar(); top=tk.Frame(window,bg=LIGHT); top.pack(fill="x",padx=10,pady=10)
         tk.Label(top,text="Search by Account Number or Name:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")

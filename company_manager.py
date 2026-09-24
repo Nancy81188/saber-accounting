@@ -98,11 +98,39 @@ class CompanyManager:
         previous=max((y for y in company["years"] if int(y["year"])<year),key=lambda y:int(y["year"]),default=None)
         if not previous: raise ValueError("Create fiscal years in chronological order")
         source=Database(previous["database"])
-        if previous.get("status")!="closed": source.close_fiscal_year(int(previous["year"]),user_id); previous["status"]="closed"
         path=self.root/company_id/f"{year}.db"; target=Database(path); target.initialize(secrets.token_urlsafe(24)); self._copy_master_data(source,target)
-        self._opening_balances(source,target,year,user_id)
         company["years"].append({"year":year,"database":str(path.resolve()),"status":"open"}); company["years"].sort(key=lambda y:int(y["year"]))
         self._write(data); return company
+
+    def reopen_year(self,company_id,year,user_id):
+        year=int(year); data=self._read(); company=next((c for c in data["companies"] if c["id"]==company_id),None)
+        if not company: raise KeyError("Company not found")
+        current=next((item for item in company.get("years",[]) if int(item["year"])==year),None)
+        if not current: raise ValueError("Fiscal year not found for this company")
+        result=Database(current["database"]).reopen_fiscal_year(year,user_id)
+        current["status"]="open"
+        next_year=next((item for item in company.get("years",[]) if int(item["year"])==year+1),None)
+        removed_opening=0
+        if next_year:
+            with Database(next_year["database"]).connect() as db:
+                ids=[row["id"] for row in db.execute("SELECT id FROM journal_entries WHERE source_type='opening' AND entry_number LIKE ?",(f"OPEN-{year+1}-%",))]
+                for entry_id in ids: db.execute("DELETE FROM journal_entries WHERE id=?",(entry_id,))
+                removed_opening=len(ids)
+        self._write(data); return {**result,"company":company,"removed_opening_entries":removed_opening}
+
+    def refresh_opening(self,company_id,source_year,user_id):
+        source_year=int(source_year); target_year=source_year+1; company=self._company(company_id)
+        source_record=next((item for item in company.get("years",[]) if int(item["year"])==source_year),None)
+        target_record=next((item for item in company.get("years",[]) if int(item["year"])==target_year),None)
+        if not source_record or not target_record: raise ValueError(f"Both fiscal years {source_year} and {target_year} must exist")
+        source=Database(source_record["database"]); target=Database(target_record["database"])
+        with target.connect() as db:
+            ids=[row["id"] for row in db.execute("SELECT id FROM journal_entries WHERE source_type='opening' AND entry_number LIKE ?",(f"OPEN-{target_year}-%",))]
+            for entry_id in ids: db.execute("DELETE FROM journal_entries WHERE id=?",(entry_id,))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"refresh_opening","fiscal_year",target_year,json.dumps({"source_year":source_year,"replaced":len(ids)}),utcnow()))
+        vouchers=self._opening_balances(source,target,target_year,user_id)
+        return {"source_year":source_year,"target_year":target_year,"opening_vouchers":vouchers,"replaced":len(ids),"provisional":source_record.get("status")!="closed"}
 
     def close_and_open_year(self,company_id,year,user_id):
         """Close one company year, create its next database, and post opening vouchers."""
@@ -111,16 +139,20 @@ class CompanyManager:
         if not company: raise KeyError("Company not found")
         current=next((y for y in company.get("years",[]) if int(y["year"])==year),None)
         if not current: raise ValueError("Fiscal year not found for this company")
-        if any(int(y["year"])==next_year for y in company.get("years",[])):
-            raise ValueError(f"Fiscal year {next_year} already exists")
+        next_record=next((item for item in company.get("years",[]) if int(item["year"])==next_year),None)
         source=Database(current["database"])
         close_result=source.close_fiscal_year(year,user_id)
         current["status"]="closed"
-        path=self.root/company_id/f"{next_year}.db"
-        target=Database(path); target.initialize(secrets.token_urlsafe(24))
-        self._copy_master_data(source,target)
+        if next_record:
+            path=Path(next_record["database"]); target=Database(path)
+            with target.connect() as db:
+                ids=[row["id"] for row in db.execute("SELECT id FROM journal_entries WHERE source_type='opening' AND entry_number LIKE ?",(f"OPEN-{next_year}-%",))]
+                for entry_id in ids: db.execute("DELETE FROM journal_entries WHERE id=?",(entry_id,))
+        else:
+            path=self.root/company_id/f"{next_year}.db"
+            target=Database(path); target.initialize(secrets.token_urlsafe(24)); self._copy_master_data(source,target)
         opening_vouchers=self._opening_balances(source,target,next_year,user_id)
-        company["years"].append({"year":next_year,"database":str(path.resolve()),"status":"open"})
+        if not next_record: company["years"].append({"year":next_year,"database":str(path.resolve()),"status":"open"})
         company["years"].sort(key=lambda item:int(item["year"]))
         self._write(data)
         return {**close_result,"company":company,"opening_vouchers":opening_vouchers}

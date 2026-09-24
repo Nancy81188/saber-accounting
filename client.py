@@ -92,6 +92,11 @@ class ApiClient:
         return self.request("GET","/api/profit-loss"+(f"?{query}" if query else ""))["items"]
     def fiscal_years(self): return self.request("GET","/api/fiscal-years")["items"]
     def close_fiscal_year(self, year): return self.request("POST","/api/fiscal-years/close",{"year":year})
+    def reopen_fiscal_year(self, year): return self.request("POST","/api/fiscal-years/reopen",{"year":year})
+    def refresh_opening(self, source_year): return self.request("POST","/api/fiscal-years/refresh-opening",{"source_year":source_year})
+    def fiscal_year_journal(self,year,from_date=None,to_date=None,currency=None):
+        query=urlencode({k:v for k,v in {"year":year,"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v})
+        return self.request("GET",f"/api/fiscal-year/journal?{query}")["items"]
     def save_party(self, item): return self.request("POST","/api/parties",item)["party"]
     def payments(self): return self.request("GET","/api/payments")["items"]
     def add_payment(self, item): return self.request("POST","/api/payments",item)

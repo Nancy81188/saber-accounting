@@ -973,6 +973,18 @@ class Database:
         with self.connect() as db:
             return [dict(row) for row in db.execute("SELECT * FROM fiscal_years ORDER BY year DESC")]
 
+    def reopen_fiscal_year(self,year,user_id):
+        year=int(year)
+        with self.connect() as db:
+            row=db.execute("SELECT status FROM fiscal_years WHERE year=?",(year,)).fetchone()
+            if not row or row["status"]!="closed": raise ValueError(f"Fiscal year {year} is not closed")
+            closing_ids=[item["id"] for item in db.execute("SELECT id FROM journal_entries WHERE source_type='year_close' AND entry_number LIKE ?",(f"CLOSE-{year}-%",))]
+            for entry_id in closing_ids: db.execute("DELETE FROM journal_entries WHERE id=?",(entry_id,))
+            db.execute("UPDATE fiscal_years SET status='open',closed_at=NULL,closed_by=NULL,details=NULL WHERE year=?",(year,))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"reopen","fiscal_year",year,json.dumps({"removed_closing_entries":len(closing_ids)}),utcnow()))
+        return {"year":year,"status":"open","removed_closing_entries":len(closing_ids)}
+
     def list_parties(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute(
@@ -1335,6 +1347,8 @@ class Database:
         account_type=str(item.get("type") or "expense").strip().lower(); parent=str(item.get("parent_code") or "").strip() or None
         if not name or account_type not in ("asset","liability","equity","income","expense"): raise ValueError("Enter a valid account name and type")
         with self.connect() as db:
+            if len(code)==4 and code.isdigit():
+                parent=parent or code; code=""
             parent_id=None
             if parent:
                 row=db.execute("SELECT id FROM accounts WHERE code=?",(parent,)).fetchone()
@@ -1348,7 +1362,7 @@ class Database:
                 else:
                     values=[int(row["code"]) for row in db.execute("SELECT code FROM accounts WHERE length(code)=9 AND code GLOB '[0-9]*'")]
                     code=str(max(values,default=100000000)+1).zfill(9)
-            if len(code)!=9 or not code.isdigit(): raise ValueError("Account number must contain exactly 9 digits or be left blank for automatic numbering")
+            if len(code)!=9 or not code.isdigit(): raise ValueError("Enter a 4-digit prefix for automatic numbering, a full 9-digit number, or leave it blank")
             if db.execute("SELECT 1 FROM accounts WHERE code=?",(code,)).fetchone(): raise ValueError(f"Account {code} already exists; duplicate accounts are not allowed")
             db.execute("INSERT INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,?)",(code,name,account_type,parent_id))
             db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",

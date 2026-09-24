@@ -397,6 +397,8 @@ class SaberAccountingTest(unittest.TestCase):
             user=db.user_for_token(db.login("admin","secret")["token"])
             created=db.save_account({"code":"","name_en":"Auto expense","type":"expense","parent_code":"6011"},user["id"])
             self.assertEqual(created["code"],"601100002")
+            prefixed=db.save_account({"code":"6011","name_en":"Auto from prefix","type":"expense"},user["id"])
+            self.assertEqual(prefixed["code"],"601100003")
             with self.assertRaisesRegex(ValueError,"already exists"):
                 db.save_account({"code":"601100002","name_en":"Duplicate","type":"expense","parent_code":"6011"},user["id"])
             invoice_id=db.create_manual_invoice({"invoice_number":"SPLIT-1","invoice_date":"22-09-2026","party_name":"Split Supplier","kind":"expenses","currency":"USD"},[
@@ -522,6 +524,27 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertEqual(target.profit_and_loss("2027-01-01","2027-12-31","USD"),[])
             years={int(item["year"]):item["status"] for item in manager._company(company["id"])["years"]}
             self.assertEqual(years[2026],"closed"); self.assertEqual(years[2027],"open")
+
+    def test_separate_year_does_not_close_previous_and_admin_can_reopen(self):
+        with tempfile.TemporaryDirectory() as folder:
+            master=Database(Path(folder)/"master.db"); master.initialize("secret")
+            user=master.user_for_token(master.login("admin","secret")["token"])
+            manager=CompanyManager(Path(folder)/"master.db")
+            company=manager.create_company({"name":"Fiscal Control","year":2024},master)
+            manager.create_year(company["id"],2025,user["id"])
+            self.assertEqual(manager.year_status(company["id"],2024),"open")
+            self.assertEqual(manager.year_status(company["id"],2025),"open")
+            source=manager.database(company["id"],2024)
+            source.import_invoice({"invoice_number":"Y24-1","invoice_date":"30-12-2024","party_name":"Client 2024","kind":"sale","currency":"USD","subtotal":100,"vat":11,"total":111},user["id"])
+            refreshed=manager.refresh_opening(company["id"],2024,user["id"])
+            self.assertTrue(refreshed["provisional"]); self.assertIn("OPEN-2025-USD",refreshed["opening_vouchers"])
+            self.assertTrue(any(row["source_type"]=="invoice" for row in source.journal()))
+            closed=manager.close_and_open_year(company["id"],2024,user["id"])
+            self.assertEqual(closed["closed_year"],2024)
+            self.assertEqual(manager.year_status(company["id"],2024),"closed")
+            reopened=manager.reopen_year(company["id"],2024,user["id"])
+            self.assertEqual(reopened["status"],"open")
+            self.assertEqual(manager.year_status(company["id"],2024),"open")
 
     def test_opening_display_currency_dc_choices_and_linked_rate(self):
         with tempfile.TemporaryDirectory() as folder:
