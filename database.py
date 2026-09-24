@@ -1689,3 +1689,37 @@ class Database:
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"save","payroll",saved_id,json.dumps({"payroll_number":number}),utcnow()))
         return next(row for row in self.list_payroll() if row["id"]==saved_id)
+
+    def post_payroll(self,payroll_id,user_id):
+        with self.connect() as db:
+            record=db.execute("""SELECT p.*,e.full_name,e.salary_account employee_salary_account,
+                e.payable_account employee_payable_account,e.branch_id FROM payroll_records p
+                JOIN employees e ON e.id=p.employee_id WHERE p.id=?""",(int(payroll_id),)).fetchone()
+            if not record: raise KeyError("Payroll record not found")
+            if record["status"]=="posted": raise ValueError("Payroll is already posted")
+            self._assert_period_open(record["period_date"])
+            settings=self.payroll_settings_for(record["period_date"])
+            salary_account=record["employee_salary_account"] or settings["salary_account"]
+            payable_account=record["employee_payable_account"] or settings["salary_payable_account"]
+            tax_account=settings["payroll_tax_account"]; nssf_account=settings["nssf_payable_account"]
+            employer_expense="621100002"
+            required=((salary_account,"Salaries and Wages","expense"),(employer_expense,"Employer NSSF Contributions","expense"),
+                (payable_account,"Salaries Payable","liability"),(tax_account,"Payroll Tax Payable","liability"),(nssf_account,"NSSF Payable","liability"))
+            for code,name,kind in required:
+                db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(code,name,kind))
+            gross=Decimal(record["gross_salary"]); net=Decimal(record["net_salary"]); tax=Decimal(record["income_tax"])
+            employee_nssf=Decimal(record["employee_nssf"])
+            employer_nssf=sum((Decimal(record[name]) for name in ("employer_medical","employer_end_service","employer_family")),Decimal("0"))
+            number=f'PAYJV-{record["payroll_number"]}'
+            entry_id=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,branch_id,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?)""",(number,record["period_date"],f'Payroll - {record["full_name"]}',"payroll",record["id"],record["currency"],record["branch_id"],user_id,utcnow())).lastrowid
+            lines=((salary_account,gross,Decimal("0")),(employer_expense,employer_nssf,Decimal("0")),
+                (payable_account,Decimal("0"),net),(tax_account,Decimal("0"),tax),(nssf_account,Decimal("0"),employee_nssf+employer_nssf))
+            for code,debit,credit in lines:
+                if not debit and not credit: continue
+                db.execute("INSERT INTO journal_lines(entry_id,account_id,description,debit,credit) VALUES(?,?,?,?,?)",
+                    (entry_id,self._account_id(db,code),f'Payroll {record["payroll_number"]}',str(debit),str(credit)))
+            db.execute("UPDATE payroll_records SET status='posted',journal_entry_id=? WHERE id=?",(entry_id,record["id"]))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"post","payroll",record["id"],json.dumps({"payroll_number":record["payroll_number"],"journal_entry":number}),utcnow()))
+        return next(row for row in self.list_payroll() if row["id"]==int(payroll_id))

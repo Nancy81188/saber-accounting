@@ -125,6 +125,7 @@ class ApiClient:
         return self.request("GET","/api/payroll"+(f"?{query}" if query else ""))["items"]
     def calculate_payroll(self,item): return self.request("POST","/api/payroll/calculate",item)
     def save_payroll(self,item): return self.request("POST","/api/payroll",item)["payroll"]
+    def post_payroll(self,payroll_id): return self.request("POST",f"/api/payroll/{payroll_id}/post",{})["payroll"]
     def payroll_settings(self,date=None):
         return self.request("GET","/api/payroll/settings"+(f"?{urlencode({'date':date})}" if date else ""))
     def save_payroll_settings(self,item): return self.request("POST","/api/payroll/settings",item)

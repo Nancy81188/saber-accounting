@@ -4,6 +4,7 @@ import tkinter as tk
 import sys
 import mimetypes
 import time
+import json
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -1177,8 +1178,8 @@ class SaberApp(tk.Tk):
 
     def build_payroll(self):
         nested=ttk.Notebook(self.payroll_tab); nested.pack(fill="both",expand=True,padx=8,pady=8)
-        employees=tk.Frame(nested,bg=LIGHT); run=tk.Frame(nested,bg=LIGHT)
-        nested.add(employees,text="Employees"); nested.add(run,text="Payroll Entry")
+        employees=tk.Frame(nested,bg=LIGHT); run=tk.Frame(nested,bg=LIGHT); settings_page=tk.Frame(nested,bg=LIGHT)
+        nested.add(employees,text="Employees"); nested.add(run,text="Payroll Entry"); nested.add(settings_page,text="Tax & NSSF Settings")
         employee_actions=tk.Frame(employees,bg=LIGHT); employee_actions.pack(fill="x",padx=10,pady=8)
         self.action_button(employee_actions,"New Employee",lambda:self.employee_dialog()).pack(side="left",padx=4)
         self.action_button(employee_actions,"Edit Selected",self.edit_selected_employee).pack(side="left",padx=4)
@@ -1202,9 +1203,22 @@ class SaberApp(tk.Tk):
         tk.Label(form,textvariable=self.payroll_result,bg=LIGHT,fg=NAVY,font=("Segoe UI",10,"bold")).grid(row=3,column=0,columnspan=6,padx=6,pady=9,sticky="w")
         self.action_button(form,"Calculate",self.calculate_payroll).grid(row=3,column=6,padx=5,pady=7)
         self.action_button(form,"Save Payroll",self.save_payroll).grid(row=3,column=7,padx=5,pady=7)
+        payroll_actions=tk.Frame(run,bg=LIGHT); payroll_actions.pack(fill="x",padx=10)
+        self.action_button(payroll_actions,"Post Selected to Accounting",self.post_selected_payroll).pack(side="left",padx=4,pady=3)
         self.payroll_tree=self.table(run,[("number","Payroll No.",135),("period","Period",95),("employee","Employee",190),("currency","Currency",65),
             ("gross","Gross",105),("tax","Tax",95),("nssf","Employee NSSF",110),("net","Net Salary",110),("status","Status",75)])
+        self.payroll_setting_vars={key:tk.StringVar() for key in ("date_from","date_to","single_allowance","spouse_allowance","child_allowance","employee_nssf_rate","medical_rate","end_service_rate","family_rate","employee_ceiling","medical_ceiling","family_ceiling","end_service_ceiling","salary_account","salary_payable_account","payroll_tax_account","nssf_payable_account")}
+        setting_labels=(("date_from","Date From"),("date_to","Date To"),("single_allowance","Single Allowance"),("spouse_allowance","Spouse Allowance"),("child_allowance","Child Allowance"),("employee_nssf_rate","Employee NSSF Rate"),("medical_rate","Employer Medical Rate"),("end_service_rate","End Service Rate"),("family_rate","Family Rate"),("employee_ceiling","Employee NSSF Ceiling"),("medical_ceiling","Medical Ceiling"),("family_ceiling","Family Ceiling"),("end_service_ceiling","End Service Ceiling"),("salary_account","Salary Expense Account"),("salary_payable_account","Salary Payable Account"),("payroll_tax_account","Payroll Tax Account"),("nssf_payable_account","NSSF Payable Account"))
+        for index,(key,label) in enumerate(setting_labels):
+            column=0 if index<9 else 2; row=index if index<9 else index-9
+            tk.Label(settings_page,text=label,bg=LIGHT).grid(row=row,column=column,padx=10,pady=4,sticky="w")
+            tk.Entry(settings_page,textvariable=self.payroll_setting_vars[key],width=24).grid(row=row,column=column+1,padx=10,pady=4,sticky="w")
+        tk.Label(settings_page,text="Tax Brackets JSON: [[ceiling,rate], ... [null,rate]]",bg=LIGHT).grid(row=9,column=0,columnspan=2,padx=10,pady=4,sticky="w")
+        self.payroll_brackets=tk.Text(settings_page,width=62,height=5); self.payroll_brackets.grid(row=10,column=0,columnspan=4,padx=10,pady=5,sticky="ew")
+        self.action_button(settings_page,"Load Settings",self.load_payroll_settings).grid(row=11,column=0,padx=10,pady=10)
+        self.action_button(settings_page,"Save Settings",self.save_payroll_settings).grid(row=11,column=1,padx=10,pady=10)
         self.load_payroll()
+        self.load_payroll_settings()
 
     def employee_dialog(self,employee=None):
         window=tk.Toplevel(self); window.title("Employee File"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
@@ -1259,6 +1273,27 @@ class SaberApp(tk.Tk):
         try: saved=self.client.save_payroll(self.payroll_payload())
         except Exception as exc: return messagebox.showerror("Payroll",str(exc))
         self.load_payroll(); messagebox.showinfo("Payroll",f'Payroll {saved["payroll_number"]} saved as draft')
+
+    def post_selected_payroll(self):
+        selected=self.payroll_tree.selection()
+        if not selected: return messagebox.showwarning("Payroll","Select a payroll record first")
+        if not messagebox.askyesno("Post Payroll","Post this payroll to the General Journal? Posted payroll cannot be edited."): return
+        try: saved=self.client.post_payroll(int(selected[0]))
+        except Exception as exc: return messagebox.showerror("Payroll",str(exc))
+        self.load_payroll(); self.load_journal(); self.load_trial(); messagebox.showinfo("Payroll",f'Payroll {saved["payroll_number"]} posted successfully')
+
+    def load_payroll_settings(self):
+        if not hasattr(self,"payroll_setting_vars"): return
+        try: settings=self.client.payroll_settings(self.payroll_period.get().strip())
+        except Exception as exc: return messagebox.showerror("Payroll Settings",str(exc))
+        for key,var in self.payroll_setting_vars.items(): var.set(settings.get(key,"") if settings.get(key) is not None else "")
+        self.payroll_brackets.delete("1.0","end"); self.payroll_brackets.insert("1.0",json.dumps(settings.get("tax_brackets",[])))
+
+    def save_payroll_settings(self):
+        payload={key:var.get().strip() for key,var in self.payroll_setting_vars.items()}
+        try: payload["tax_brackets"]=json.loads(self.payroll_brackets.get("1.0","end").strip()); self.client.save_payroll_settings(payload)
+        except Exception as exc: return messagebox.showerror("Payroll Settings",str(exc))
+        messagebox.showinfo("Payroll Settings","Tax and NSSF settings saved successfully")
 
     def build_journal(self):
         filters=tk.Frame(self.journal_tab,bg=LIGHT); filters.pack(fill="x",padx=10,pady=(10,0))

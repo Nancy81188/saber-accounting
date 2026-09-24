@@ -565,5 +565,11 @@ class SaberAccountingTest(unittest.TestCase):
                 "transport":"10000000","commission":"2000000","schooling":"3000000","bonus":"4000000"},user["id"])
             self.assertTrue(saved["payroll_number"].startswith("PAY-202506-"))
             self.assertEqual(saved["status"],"draft")
+            posted=db.post_payroll(saved["id"],user["id"])
+            self.assertEqual(posted["status"],"posted")
+            lines=[row for row in db.journal() if row["source_type"]=="payroll" and row["source_id"]==saved["id"]]
+            self.assertTrue(lines)
+            self.assertAlmostEqual(sum(row["debit"] for row in lines),sum(row["credit"] for row in lines),places=2)
+            with self.assertRaisesRegex(ValueError,"already posted"): db.post_payroll(saved["id"],user["id"])
 
 if __name__ == "__main__": unittest.main()

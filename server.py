@@ -240,6 +240,11 @@ class ApiHandler(BaseHTTPRequestHandler):
             try: result=self.db.save_payroll(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"payroll":result})
+        if path.startswith("/api/payroll/") and path.endswith("/post"):
+            try: result=self.db.post_payroll(int(path.split("/")[-2]),user["id"])
+            except KeyError: return self._json(404,{"error":"Payroll record not found"})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"payroll":result})
         if path == "/api/payroll/settings":
             if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
             try: result=self.db.save_payroll_settings(body,user["id"])
