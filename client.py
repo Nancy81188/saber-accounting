@@ -89,6 +89,19 @@ class ApiClient:
             "file_name":file_name,"mime_type":mime_type,"content":base64.b64encode(content).decode("ascii")})
     def download_attachment(self, attachment_id):
         result=self.request("GET",f"/api/attachments/{attachment_id}"); result["content"]=base64.b64decode(result["content"]); return result
+    def document_cases(self): return self.request("GET","/api/document-cases")["items"]
+    def save_document_case(self,item): return self.request("POST","/api/document-cases",item)["case"]
+    def post_document_case(self,case_id): return self.request("POST",f"/api/document-cases/{case_id}/post",{})["case"]
+    def case_attachments(self,case_id): return self.request("GET",f"/api/document-cases/{case_id}/attachments")["items"]
+    def upload_case_attachment(self,case_id,role,file_name,mime_type,content):
+        return self.request("POST",f"/api/document-cases/{case_id}/attachments",{"document_role":role,"file_name":file_name,"mime_type":mime_type,"content":base64.b64encode(content).decode("ascii")})
+    def download_case_attachment(self,attachment_id):
+        result=self.request("GET",f"/api/case-attachments/{attachment_id}"); result["content"]=base64.b64decode(result["content"]); return result
+    def party_documents(self,party_id): return self.request("GET",f"/api/parties/{party_id}/documents")["items"]
+    def upload_party_document(self,party_id,item,content):
+        return self.request("POST",f"/api/parties/{party_id}/documents",{**item,"content":base64.b64encode(content).decode("ascii")})
+    def download_party_document(self,document_id):
+        result=self.request("GET",f"/api/party-documents/{document_id}"); result["content"]=base64.b64decode(result["content"]); return result
     def profit_loss(self, from_date=None, to_date=None, currency=None):
         query=urlencode({k:v for k,v in {"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v})
         return self.request("GET","/api/profit-loss"+(f"?{query}" if query else ""))["items"]
