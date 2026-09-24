@@ -184,6 +184,17 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/vat-report":
             query=parse_qs(parsed.query)
             return self._json(200,self.db.vat_report(query.get("from_date",[None])[0],query.get("to_date",[None])[0],query.get("currency",[None])[0]))
+        if path == "/api/cash-flow":
+            query=parse_qs(parsed.query)
+            return self._json(200,{"items":self.db.cash_flow(query.get("from_date",[None])[0],query.get("to_date",[None])[0],query.get("currency",[None])[0])})
+        if path == "/api/aging":
+            query=parse_qs(parsed.query)
+            return self._json(200,{"items":self.db.aging_report(query.get("as_of_date",[None])[0],query.get("kind",[None])[0],query.get("currency",[None])[0])})
+        if path == "/api/comparative-reports":
+            query=parse_qs(parsed.query)
+            try: result=self.db.comparative_reports(query.get("from_date",[""])[0],query.get("to_date",[""])[0],query.get("currency",[None])[0])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
         return self._json(404, {"error": "Not found"})
 
     def do_POST(self):
