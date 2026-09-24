@@ -399,6 +399,7 @@ class SaberAccountingTest(unittest.TestCase):
             user=db.user_for_token(db.login("admin","secret")["token"])
             created=db.save_account({"code":"","name_en":"Auto expense","type":"expense","parent_code":"6011"},user["id"])
             self.assertEqual(created["code"],"601100002")
+            self.assertEqual(db.next_account_number("6011"),"601100003")
             prefixed=db.save_account({"code":"6011","name_en":"Auto from prefix","type":"expense"},user["id"])
             self.assertEqual(prefixed["code"],"601100003")
             with self.assertRaisesRegex(ValueError,"already exists"):
@@ -472,6 +473,16 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertTrue(all("usd_opening" in r and "lbp_closing_balance" in r for r in exact))
             ranged=db.trial_balance("2026-09-10","2026-09-20",None,True,"4011","601199999")
             self.assertTrue(ranged); self.assertTrue(all(4011<=int(''.join(c for c in r["code"] if c.isdigit()))<=601199999 for r in ranged))
+
+    def test_trial_balance_posted_review_and_both_filters(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"posting_filter.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            db.import_invoice({"invoice_number":"POST-1","invoice_date":"01-01-2026","party_name":"Posted Client","kind":"sale","currency":"USD","subtotal":100,"vat":11,"total":111,"status":"posted"},user["id"])
+            db.import_invoice({"invoice_number":"REV-1","invoice_date":"02-01-2026","party_name":"Review Client","kind":"sale","currency":"USD","subtotal":200,"vat":22,"total":222,"status":"review"},user["id"])
+            posted=db.trial_balance(posting_status="posted"); review=db.trial_balance(posting_status="review"); both=db.trial_balance(posting_status="both")
+            self.assertTrue(posted); self.assertTrue(review)
+            self.assertGreater(sum(abs(r["balance"]) for r in both),sum(abs(r["balance"]) for r in posted))
 
     def test_report_exports(self):
         with tempfile.TemporaryDirectory() as folder:

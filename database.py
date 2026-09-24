@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
 CREATE TABLE IF NOT EXISTS employees (
  id INTEGER PRIMARY KEY, employee_number TEXT NOT NULL UNIQUE, full_name TEXT NOT NULL,
  national_id TEXT, mof_number TEXT, nssf_number TEXT, address TEXT, contact_number TEXT,
- marital_status TEXT NOT NULL DEFAULT 'single', spouse_works INTEGER NOT NULL DEFAULT 0, children INTEGER NOT NULL DEFAULT 0,
+ marital_status TEXT NOT NULL DEFAULT 'single', spouse_works INTEGER NOT NULL DEFAULT 0, children INTEGER NOT NULL DEFAULT 0, employee_group TEXT NOT NULL DEFAULT 'employee',
  hire_date TEXT, leave_date TEXT, job_title TEXT, branch_id INTEGER REFERENCES branches(id),
  currency TEXT NOT NULL DEFAULT 'LBP', base_salary TEXT NOT NULL DEFAULT '0',
  salary_account TEXT, payable_account TEXT, active INTEGER NOT NULL DEFAULT 1,
@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS payroll_settings (
  family_ceiling TEXT NOT NULL DEFAULT '0', end_service_ceiling TEXT NOT NULL DEFAULT '0',
  salary_account TEXT NOT NULL DEFAULT '621100001', salary_payable_account TEXT NOT NULL DEFAULT '421100001',
  payroll_tax_account TEXT NOT NULL DEFAULT '443100001', nssf_payable_account TEXT NOT NULL DEFAULT '447100001',
+ employee_account_map TEXT NOT NULL DEFAULT '{}', manager_account_map TEXT NOT NULL DEFAULT '{}',
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL,
  UNIQUE(date_from)
 );
@@ -243,11 +244,15 @@ class Database:
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_parties_account_number ON parties(account_number) WHERE account_number IS NOT NULL")
             employee_columns={row["name"] for row in db.execute("PRAGMA table_info(employees)")}
             if "spouse_works" not in employee_columns: db.execute("ALTER TABLE employees ADD COLUMN spouse_works INTEGER NOT NULL DEFAULT 0")
+            if "employee_group" not in employee_columns: db.execute("ALTER TABLE employees ADD COLUMN employee_group TEXT NOT NULL DEFAULT 'employee'")
             payroll_columns={row["name"] for row in db.execute("PRAGMA table_info(payroll_records)")}
             if "income_tax_lbp" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN income_tax_lbp TEXT NOT NULL DEFAULT '0'")
             if "retro_salary" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_salary TEXT NOT NULL DEFAULT '0'")
             if "retro_from" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_from TEXT")
             if "retro_to" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_to TEXT")
+            payroll_setting_columns={row["name"] for row in db.execute("PRAGMA table_info(payroll_settings)")}
+            if "employee_account_map" not in payroll_setting_columns: db.execute("ALTER TABLE payroll_settings ADD COLUMN employee_account_map TEXT NOT NULL DEFAULT '{}'")
+            if "manager_account_map" not in payroll_setting_columns: db.execute("ALTER TABLE payroll_settings ADD COLUMN manager_account_map TEXT NOT NULL DEFAULT '{}'")
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('base_currency','USD')")
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('backup_interval_hours','24')")
@@ -490,7 +495,8 @@ class Database:
             non_deductible=Decimal(str(item.get("non_deductible_subtotal") or 0)); subtotal=deductible+non_deductible
             vat = Decimal(str(item.get("vat") or 0)); total = Decimal(str(item.get("total") or subtotal + vat))
             currency_issue = str(item.get("currency_issue") or "")
-            status = "posted" if total == subtotal + vat and not currency_issue.startswith(("conflicting:", "unsupported:")) else "review"
+            requested_status=str(item.get("status") or "").strip().lower()
+            status=requested_status if requested_status in ("posted","review") else ("posted" if total == subtotal + vat and not currency_issue.startswith(("conflicting:", "unsupported:")) else "review")
             supplier_account = str(item.get("supplier_account") or DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]).strip()
             party_account=self._ensure_party_account(db,party)
             if kind=="purchase" and (not item.get("supplier_account") or supplier_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]):
@@ -636,6 +642,17 @@ class Database:
             db.execute("DELETE FROM journal_entries WHERE id=?",(int(entry_id),))
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"delete","journal_voucher",int(entry_id),json.dumps(details),utcnow()))
+        return {"deleted":int(entry_id)}
+
+    def delete_opening_voucher(self,entry_id,user_id):
+        with self.connect() as db:
+            entry=db.execute("SELECT * FROM journal_entries WHERE id=?",(int(entry_id),)).fetchone()
+            if not entry: raise KeyError(entry_id)
+            if entry["source_type"]!="opening": raise ValueError("Only opening vouchers can be deleted here")
+            details={"entry_number":entry["entry_number"],"description":entry["description"]}
+            db.execute("DELETE FROM journal_entries WHERE id=?",(int(entry_id),))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"delete","opening_voucher",int(entry_id),json.dumps(details),utcnow()))
         return {"deleted":int(entry_id)}
 
     def save_journal_voucher(self,item,lines,user_id,entry_id=None):
@@ -1349,6 +1366,14 @@ class Database:
                 p.code parent_code FROM accounts a LEFT JOIN accounts p ON p.id=a.parent_id
                 ORDER BY CASE WHEN instr(a.code,'.')>0 THEN replace(a.code,'.','') ELSE a.code END""")]
 
+    def next_account_number(self,prefix):
+        prefix="".join(character for character in str(prefix or "") if character.isdigit())
+        if len(prefix)!=4: raise ValueError("Enter the first 4 account digits")
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM accounts WHERE code=?",(prefix,)).fetchone(): raise ValueError("The 4-digit parent account was not found")
+            values=[int(row["code"]) for row in db.execute("SELECT code FROM accounts WHERE length(code)=9 AND code GLOB '[0-9]*' AND code LIKE ?",(prefix+"%",))]
+        return str(max(values,default=int(prefix+"00000"))+1).zfill(9)
+
     def save_account(self,item,user_id):
         code=str(item.get("code") or "").strip(); name=str(item.get("name_en") or "").strip()
         account_type=str(item.get("type") or "expense").strip().lower(); parent=str(item.get("parent_code") or "").strip() or None
@@ -1364,8 +1389,10 @@ class Database:
             if not code:
                 prefix="".join(character for character in (parent or "") if character.isdigit())
                 if prefix and len(prefix)<9:
-                    values=[int(row["code"]) for row in db.execute("SELECT code FROM accounts WHERE length(code)=9 AND code GLOB '[0-9]*' AND code LIKE ?",(prefix+"%",))]
-                    code=str(max(values,default=int(prefix+"0"*(9-len(prefix))))+1).zfill(9)
+                    if len(prefix)==4: code=self.next_account_number(prefix)
+                    else:
+                        values=[int(row["code"]) for row in db.execute("SELECT code FROM accounts WHERE length(code)=9 AND code GLOB '[0-9]*' AND code LIKE ?",(prefix+"%",))]
+                        code=str(max(values,default=int(prefix+"0"*(9-len(prefix))))+1).zfill(9)
                 else:
                     values=[int(row["code"]) for row in db.execute("SELECT code FROM accounts WHERE length(code)=9 AND code GLOB '[0-9]*'")]
                     code=str(max(values,default=100000000)+1).zfill(9)
@@ -1420,9 +1447,15 @@ class Database:
         with self.connect() as db:
             rows = [dict(row) for row in db.execute(f"""SELECT e.id entry_id,e.entry_number,e.entry_date,
                 e.description,e.source_type,e.source_id,e.currency,e.branch_id,COALESCE(b.name,'Head Office') branch_name,a.code account_code,a.name_en account_name,
+                CASE WHEN e.source_type='payroll' THEN 'Payroll' WHEN e.source_type='expense' THEN 'Expenses'
+                     WHEN e.source_type='journal_voucher' THEN 'Journal Vouchers' WHEN e.source_type IN ('opening','year_close') THEN 'Opening / Closing'
+                     WHEN e.source_type='invoice' AND i.kind='sale' THEN 'Sales'
+                     WHEN e.source_type='invoice' AND COALESCE(i.entry_type,i.kind)='expenses' THEN 'Expenses'
+                     WHEN e.source_type='invoice' THEN 'Purchases' ELSE 'Other' END journal_category,
                 COALESCE(p.name,'') party_name,CAST(j.debit AS REAL) debit,CAST(j.credit AS REAL) credit,j.id line_id
                 FROM journal_lines j JOIN journal_entries e ON e.id=j.entry_id
                 JOIN accounts a ON a.id=j.account_id LEFT JOIN parties p ON p.id=j.party_id LEFT JOIN branches b ON b.id=e.branch_id
+                LEFT JOIN invoices i ON e.source_type='invoice' AND i.id=e.source_id
                 {where_clause}
                 ORDER BY {normalized_date},e.id,j.id LIMIT ?""", parameters)]
         balances = {}
@@ -1433,7 +1466,7 @@ class Database:
             row.pop("line_id", None)
         return rows
 
-    def trial_balance(self, from_date=None, to_date=None, account_code=None, include_subaccounts=True, account_from=None, account_to=None, branch_id=None):
+    def trial_balance(self, from_date=None, to_date=None, account_code=None, include_subaccounts=True, account_from=None, account_to=None, branch_id=None, posting_status="posted"):
         conditions = []
         parameters = []
         normalized_date = """CASE
@@ -1451,11 +1484,14 @@ class Database:
         if account_to:
             conditions.append("CAST(REPLACE(a.code,'.','') AS INTEGER)<=?"); parameters.append(int(''.join(c for c in str(account_to) if c.isdigit())))
         if branch_id: conditions.append("e.branch_id=?"); parameters.append(int(branch_id))
+        if posting_status=="posted": conditions.append("(e.source_type!='invoice' OR i.status='posted')")
+        elif posting_status=="review": conditions.append("(e.source_type='invoice' AND i.status='review')")
         where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as db:
             raw=[dict(r) for r in db.execute(f"""SELECT a.code,a.name_en,e.currency,e.entry_date,
                 CAST(j.debit AS REAL) debit,CAST(j.credit AS REAL) credit
                 FROM journal_lines j JOIN accounts a ON a.id=j.account_id JOIN journal_entries e ON e.id=j.entry_id
+                LEFT JOIN invoices i ON e.source_type='invoice' AND i.id=e.source_id
                 {where_clause} ORDER BY e.currency,a.code""",parameters)]
         totals={}
         for row in raw:
@@ -1589,22 +1625,24 @@ class Database:
         currency=str(item.get("currency") or "LBP").upper()
         if currency not in ("USD","LBP","EUR","AED"): raise ValueError("Invalid employee currency")
         children=max(0,int(item.get("children") or 0)); spouse_works=1 if item.get("spouse_works",False) else 0; active=1 if item.get("active",True) else 0
+        employee_group=str(item.get("employee_group") or "employee").lower()
+        if employee_group not in ("employee","manager"): raise ValueError("Employee group must be Employee or Manager")
         employee_id=item.get("id")
         values=(number,name,str(item.get("national_id") or "").strip(),str(item.get("mof_number") or "").strip(),
             str(item.get("nssf_number") or "").strip(),str(item.get("address") or "").strip(),str(item.get("contact_number") or "").strip(),
-            str(item.get("marital_status") or "single").lower(),spouse_works,children,item.get("hire_date") or None,item.get("leave_date") or None,
+            str(item.get("marital_status") or "single").lower(),spouse_works,children,employee_group,item.get("hire_date") or None,item.get("leave_date") or None,
             str(item.get("job_title") or "").strip(),int(item["branch_id"]) if item.get("branch_id") else None,currency,
             str(Decimal(str(item.get("base_salary") or 0))),item.get("salary_account") or "621100001",
             item.get("payable_account") or "421100001",active)
         with self.connect() as db:
             if employee_id:
                 db.execute("""UPDATE employees SET employee_number=?,full_name=?,national_id=?,mof_number=?,nssf_number=?,address=?,contact_number=?,
-                    marital_status=?,spouse_works=?,children=?,hire_date=?,leave_date=?,job_title=?,branch_id=?,currency=?,base_salary=?,salary_account=?,payable_account=?,active=? WHERE id=?""",
+                    marital_status=?,spouse_works=?,children=?,employee_group=?,hire_date=?,leave_date=?,job_title=?,branch_id=?,currency=?,base_salary=?,salary_account=?,payable_account=?,active=? WHERE id=?""",
                     values+(int(employee_id),)); saved_id=int(employee_id); action="update"
             else:
                 saved_id=db.execute("""INSERT INTO employees(employee_number,full_name,national_id,mof_number,nssf_number,address,contact_number,
-                    marital_status,spouse_works,children,hire_date,leave_date,job_title,branch_id,currency,base_salary,salary_account,payable_account,active,created_by,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",values+(user_id,utcnow())).lastrowid; action="create"
+                    marital_status,spouse_works,children,employee_group,hire_date,leave_date,job_title,branch_id,currency,base_salary,salary_account,payable_account,active,created_by,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",values+(user_id,utcnow())).lastrowid; action="create"
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,action,"employee",saved_id,json.dumps({"employee_number":number,"name":name}),utcnow()))
         return next(row for row in self.list_employees() if row["id"]==saved_id)
@@ -1618,8 +1656,18 @@ class Database:
                 ORDER BY date_from DESC LIMIT 1""",(target,target)).fetchone()
             if not row: row=db.execute("SELECT * FROM payroll_settings ORDER BY date_from DESC LIMIT 1").fetchone()
         result=dict(row) if row else {}
-        if result: result["tax_brackets"]=json.loads(result["tax_brackets"])
+        if result:
+            result["tax_brackets"]=json.loads(result["tax_brackets"])
+            defaults=self.default_payroll_account_map()
+            for key in ("employee_account_map","manager_account_map"):
+                try: result[key]={**defaults,**json.loads(result.get(key) or "{}")}
+                except (TypeError,ValueError): result[key]=dict(defaults)
         return result
+
+    @staticmethod
+    def default_payroll_account_map():
+        return {"salary":"621100001","transport":"621100003","overtime":"621100004","commission":"621100005","retro_salary":"621100006",
+            "schooling":"621100007","bonus":"621100008","thirteenth_month":"621100009","tax":"443100001","nssf":"447100001","payable":"421100001"}
 
     def save_payroll_settings(self,item,user_id):
         date_from=str(item.get("date_from") or "").strip()
@@ -1640,6 +1688,9 @@ class Database:
                 family_ceiling=excluded.family_ceiling,end_service_ceiling=excluded.end_service_ceiling,salary_account=excluded.salary_account,
                 salary_payable_account=excluded.salary_payable_account,payroll_tax_account=excluded.payroll_tax_account,nssf_payable_account=excluded.nssf_payable_account""",
                 (date_from,item.get("date_to") or None,json.dumps(brackets),*values,user_id,utcnow()))
+            for key in ("employee_account_map","manager_account_map"):
+                mapping={**self.default_payroll_account_map(),**(item.get(key) or {})}
+                db.execute(f"UPDATE payroll_settings SET {key}=? WHERE date_from=?",(json.dumps(mapping),date_from))
         return self.payroll_settings_for(date_from)
 
     @staticmethod
@@ -1720,17 +1771,21 @@ class Database:
     def post_payroll(self,payroll_id,user_id):
         with self.connect() as db:
             record=db.execute("""SELECT p.*,e.full_name,e.salary_account employee_salary_account,
-                e.payable_account employee_payable_account,e.branch_id FROM payroll_records p
+                e.payable_account employee_payable_account,e.branch_id,e.employee_group FROM payroll_records p
                 JOIN employees e ON e.id=p.employee_id WHERE p.id=?""",(int(payroll_id),)).fetchone()
             if not record: raise KeyError("Payroll record not found")
             if record["status"]=="posted": raise ValueError("Payroll is already posted")
             self._assert_period_open(record["period_date"])
             settings=self.payroll_settings_for(record["period_date"])
-            salary_account=record["employee_salary_account"] or settings["salary_account"]
-            payable_account=record["employee_payable_account"] or settings["salary_payable_account"]
-            tax_account=settings["payroll_tax_account"]; nssf_account=settings["nssf_payable_account"]
+            mapping=dict(settings["manager_account_map"] if record["employee_group"]=="manager" else settings["employee_account_map"])
+            salary_account=record["employee_salary_account"] or mapping["salary"]
+            payable_account=record["employee_payable_account"] or mapping["payable"]
+            mapping["salary"]=salary_account; mapping["payable"]=payable_account
+            tax_account=mapping["tax"]; nssf_account=mapping["nssf"]
             employer_expense="621100002"
-            required=((salary_account,"Salaries and Wages","expense"),(employer_expense,"Employer NSSF Contributions","expense"),
+            component_names={"salary":"Salaries and Wages","transport":"Transportation","overtime":"Overtime","commission":"Commission","retro_salary":"Retroactive Salary","schooling":"Schooling Allowance","bonus":"Bonus","thirteenth_month":"13th Salary"}
+            required=[(mapping[key],name,"expense") for key,name in component_names.items()]
+            required+=((salary_account,"Salaries and Wages","expense"),(employer_expense,"Employer NSSF Contributions","expense"),
                 (payable_account,"Salaries Payable","liability"),(tax_account,"Payroll Tax Payable","liability"),(nssf_account,"NSSF Payable","liability"))
             for code,name,kind in required:
                 db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(code,name,kind))
@@ -1740,8 +1795,8 @@ class Database:
             number=f'PAYJV-{record["payroll_number"]}'
             entry_id=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,branch_id,created_by,created_at)
                 VALUES(?,?,?,?,?,?,?,?,?)""",(number,record["period_date"],f'Payroll - {record["full_name"]}',"payroll",record["id"],record["currency"],record["branch_id"],user_id,utcnow())).lastrowid
-            lines=((salary_account,gross,Decimal("0")),(employer_expense,employer_nssf,Decimal("0")),
-                (payable_account,Decimal("0"),net),(tax_account,Decimal("0"),tax),(nssf_account,Decimal("0"),employee_nssf+employer_nssf))
+            lines=[(mapping[key],Decimal(record[key]),Decimal("0")) for key in component_names]
+            lines+=((employer_expense,employer_nssf,Decimal("0")),(payable_account,Decimal("0"),net),(tax_account,Decimal("0"),tax),(nssf_account,Decimal("0"),employee_nssf+employer_nssf))
             for code,debit,credit in lines:
                 if not debit and not credit: continue
                 db.execute("INSERT INTO journal_lines(entry_id,account_id,description,debit,credit) VALUES(?,?,?,?,?)",

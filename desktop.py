@@ -68,6 +68,7 @@ class SaberApp(tk.Tk):
         self.trial_from_date = tk.StringVar()
         self.trial_to_date = tk.StringVar()
         self.trial_account = tk.StringVar(); self.trial_account_from=tk.StringVar(); self.trial_account_to=tk.StringVar(); self.trial_scope=tk.StringVar(value="Detailed Trial Balance"); self.trial_display_currency=tk.StringVar(value="USD + LBP")
+        self.trial_posting_status=tk.StringVar(value="Posted Only")
         self.invoice_account_search=tk.StringVar()
         self.invoice_sort_by=tk.StringVar(value="Date"); self.invoice_sort_order=tk.StringVar(value="Descending")
         self.invoice_branch=tk.StringVar(value="All Branches"); self.manual_branch=tk.StringVar(value="Head Office"); self.trial_branch=tk.StringVar(value="All Branches"); self.statement_branch=tk.StringVar(value="All Branches")
@@ -80,6 +81,7 @@ class SaberApp(tk.Tk):
         self.journal_from_date = tk.StringVar()
         self.journal_to_date = tk.StringVar()
         self.journal_view_year = tk.StringVar()
+        self.journal_section = tk.StringVar(value="All Sections")
         self.journal_sort_by=tk.StringVar(value="Date"); self.journal_sort_order=tk.StringVar(value="Ascending")
         self.pnl_from_date = tk.StringVar(value=f"01-01-{datetime.now().year}")
         self.pnl_to_date = tk.StringVar(value=f"31-12-{datetime.now().year}")
@@ -1245,6 +1247,15 @@ class SaberApp(tk.Tk):
         self.payroll_brackets=tk.Text(settings_page,width=62,height=5); self.payroll_brackets.grid(row=10,column=0,columnspan=4,padx=10,pady=5,sticky="ew")
         self.action_button(settings_page,"Load Settings",self.load_payroll_settings).grid(row=11,column=0,padx=10,pady=10)
         self.action_button(settings_page,"Save Settings",self.save_payroll_settings).grid(row=11,column=1,padx=10,pady=10)
+        mapping_frame=tk.LabelFrame(settings_page,text="Standard Posting Accounts",bg=LIGHT,padx=8,pady=6); mapping_frame.grid(row=12,column=0,columnspan=4,padx=10,pady=8,sticky="ew")
+        self.payroll_employee_accounts={key:tk.StringVar() for key in ("salary","transport","overtime","commission","retro_salary","schooling","bonus","thirteenth_month","tax","nssf","payable")}
+        self.payroll_manager_accounts={key:tk.StringVar() for key in self.payroll_employee_accounts}
+        tk.Label(mapping_frame,text="Component",bg=LIGHT,font=("Segoe UI",9,"bold")).grid(row=0,column=0,padx=5); tk.Label(mapping_frame,text="Employees",bg=LIGHT,font=("Segoe UI",9,"bold")).grid(row=0,column=1,padx=5); tk.Label(mapping_frame,text="Managers",bg=LIGHT,font=("Segoe UI",9,"bold")).grid(row=0,column=2,padx=5)
+        labels={"salary":"Salary","transport":"Transportation","overtime":"Overtime","commission":"Commission","retro_salary":"Retro Salary","schooling":"Schooling","bonus":"Bonus","thirteenth_month":"13th Salary","tax":"Payroll Tax","nssf":"NSSF","payable":"Net Salary Payable"}
+        for index,(key,label) in enumerate(labels.items(),1):
+            tk.Label(mapping_frame,text=label,bg=LIGHT).grid(row=index,column=0,padx=5,pady=2,sticky="w")
+            self.account_search_box(mapping_frame,self.payroll_employee_accounts[key],16).grid(row=index,column=1,padx=5,pady=2)
+            self.account_search_box(mapping_frame,self.payroll_manager_accounts[key],16).grid(row=index,column=2,padx=5,pady=2)
         self.load_payroll()
         self.load_payroll_settings()
 
@@ -1252,7 +1263,7 @@ class SaberApp(tk.Tk):
         window=tk.Toplevel(self); window.title("Employee File"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
         data=employee or {}; fields={key:tk.StringVar(value=str(data.get(key,""))) for key in ("employee_number","full_name","national_id","mof_number","nssf_number","address","contact_number","job_title","hire_date","leave_date","base_salary","salary_account","payable_account")}
         if not fields["employee_number"].get(): fields["employee_number"].set("1000")
-        marital=tk.StringVar(value=data.get("marital_status","single")); spouse_works=tk.BooleanVar(value=bool(data.get("spouse_works",0))); children=tk.StringVar(value=str(data.get("children",0))); currency=tk.StringVar(value=data.get("currency","LBP")); active=tk.BooleanVar(value=bool(data.get("active",1)))
+        marital=tk.StringVar(value=data.get("marital_status","single")); spouse_works=tk.BooleanVar(value=bool(data.get("spouse_works",0))); children=tk.StringVar(value=str(data.get("children",0))); employee_group=tk.StringVar(value=data.get("employee_group","employee")); currency=tk.StringVar(value=data.get("currency","LBP")); active=tk.BooleanVar(value=bool(data.get("active",1)))
         rows=(("employee_number","Employee ID / 4-digit prefix"),("full_name","Full Name"),("national_id","National ID"),("mof_number","MOF Number"),("nssf_number","NSSF Number"),("address","Address"),("contact_number","Contact Number"),("job_title","Job Title"),("hire_date","Hire Date"),("leave_date","Leave Date"),("base_salary","Base Salary"),("salary_account","Salary Expense Account"),("payable_account","Salary Payable Account"))
         for index,(key,label) in enumerate(rows):
             column=0 if index<7 else 2; row=index if index<7 else index-7
@@ -1262,12 +1273,13 @@ class SaberApp(tk.Tk):
         tk.Label(window,text="Currency",bg=LIGHT).grid(row=7,column=2,padx=10,pady=5,sticky="w"); ttk.Combobox(window,textvariable=currency,values=["LBP","USD","EUR","AED"],state="readonly",width=25).grid(row=7,column=3)
         tk.Checkbutton(window,text="Spouse Works",variable=spouse_works,bg=LIGHT).grid(row=8,column=2,sticky="w")
         tk.Checkbutton(window,text="Active",variable=active,bg=LIGHT).grid(row=8,column=3,sticky="w")
+        tk.Label(window,text="Payroll Group",bg=LIGHT).grid(row=9,column=0,padx=10,pady=5,sticky="w"); ttk.Combobox(window,textvariable=employee_group,values=["employee","manager"],state="readonly",width=25).grid(row=9,column=1)
         def save():
-            payload={key:var.get().strip() for key,var in fields.items()}; payload.update({"id":data.get("id"),"marital_status":marital.get(),"spouse_works":spouse_works.get(),"children":children.get(),"currency":currency.get(),"active":active.get()})
+            payload={key:var.get().strip() for key,var in fields.items()}; payload.update({"id":data.get("id"),"marital_status":marital.get(),"spouse_works":spouse_works.get(),"children":children.get(),"employee_group":employee_group.get(),"currency":currency.get(),"active":active.get()})
             try: saved=self.client.save_employee(payload)
             except Exception as exc: return messagebox.showerror("Employee",str(exc),parent=window)
             window.destroy(); self.load_payroll(); messagebox.showinfo("Employee",f'Employee {saved["employee_number"]} saved successfully')
-        self.action_button(window,"Save Employee",save).grid(row=9,column=0,columnspan=4,pady=14)
+        self.action_button(window,"Save Employee",save).grid(row=10,column=0,columnspan=4,pady=14)
 
     def edit_selected_employee(self):
         selected=self.employee_tree.selection()
@@ -1320,10 +1332,14 @@ class SaberApp(tk.Tk):
         try: settings=self.client.payroll_settings(self.payroll_period.get().strip())
         except Exception as exc: return messagebox.showerror("Payroll Settings",str(exc))
         for key,var in self.payroll_setting_vars.items(): var.set(settings.get(key,"") if settings.get(key) is not None else "")
+        for key,var in self.payroll_employee_accounts.items(): var.set(settings.get("employee_account_map",{}).get(key,""))
+        for key,var in self.payroll_manager_accounts.items(): var.set(settings.get("manager_account_map",{}).get(key,""))
         self.payroll_brackets.delete("1.0","end"); self.payroll_brackets.insert("1.0",json.dumps(settings.get("tax_brackets",[])))
 
     def save_payroll_settings(self):
         payload={key:var.get().strip() for key,var in self.payroll_setting_vars.items()}
+        payload["employee_account_map"]={key:var.get().split(" - ",1)[0].strip() for key,var in self.payroll_employee_accounts.items()}
+        payload["manager_account_map"]={key:var.get().split(" - ",1)[0].strip() for key,var in self.payroll_manager_accounts.items()}
         try: payload["tax_brackets"]=json.loads(self.payroll_brackets.get("1.0","end").strip()); self.client.save_payroll_settings(payload)
         except Exception as exc: return messagebox.showerror("Payroll Settings",str(exc))
         messagebox.showinfo("Payroll Settings","Tax and NSSF settings saved successfully")
@@ -1344,6 +1360,8 @@ class SaberApp(tk.Tk):
             values=["Date","Voucher Number","Account Number","Account Name","Customer / Supplier","Debit","Credit","Currency"]).pack(side="left",padx=4)
         ttk.Combobox(filters,textvariable=self.journal_sort_order,state="readonly",width=10,
             values=["Ascending","Descending"]).pack(side="left",padx=(0,8))
+        ttk.Combobox(filters,textvariable=self.journal_section,state="readonly",width=17,
+            values=["All Sections","Payroll","Expenses","Purchases","Sales","Journal Vouchers","Opening / Closing"]).pack(side="left",padx=(0,8))
         tk.Button(filters,text="Apply",command=self.load_journal,bg=GOLD,fg=NAVY,
                   font=("Segoe UI",9,"bold"),border=0,padx=16,pady=6).pack(side="left")
         self.journal_tree=self.table(self.journal_tab,[
@@ -1382,6 +1400,7 @@ class SaberApp(tk.Tk):
         view_year=int(self.journal_view_year.get() or self.current_fiscal_year)
         try: rows=self.client.journal(dates[0],dates[1],currency) if view_year==int(self.current_fiscal_year) else self.client.fiscal_year_journal(view_year,dates[0],dates[1],currency)
         except Exception as exc: return messagebox.showerror("General Journal",str(exc))
+        if self.journal_section.get()!="All Sections": rows=[row for row in rows if row.get("journal_category")==self.journal_section.get()]
         sort_name=self.journal_sort_by.get()
         def journal_key(row):
             if sort_name=="Date": return sortable_date(row.get("entry_date"))
@@ -1410,6 +1429,19 @@ class SaberApp(tk.Tk):
         entry_number=str(self.journal_tree.item(selected[0],"values")[0])
         row=next((item for item in getattr(self,"journal_rows",[]) if str(item["entry_number"])==entry_number),None)
         if not row: return messagebox.showwarning("General Journal","Selected entry was not found")
+        if row.get("source_type")=="year_close":
+            year=int(row.get("source_id") or str(row["entry_number"]).split("-")[1])
+            if not messagebox.askyesno("Reopen Fiscal Year",f"This is a closing voucher. Reopen fiscal year {year} and remove all its closing entries?"): return
+            try: self.client.reopen_fiscal_year(year)
+            except Exception as exc: return messagebox.showerror("Reopen Fiscal Year",str(exc))
+            self.load_journal(); return messagebox.showinfo("Fiscal Year",f"Fiscal year {year} reopened successfully")
+        if row.get("source_type")=="opening":
+            if not messagebox.askyesno("Delete Opening Voucher",f'Delete opening voucher {entry_number}? You can recreate it with Refresh Next-Year Opening.'): return
+            try: self.client.delete_opening_voucher(row["entry_id"])
+            except Exception as exc: return messagebox.showerror("Delete Opening Voucher",str(exc))
+            self.load_journal(); self.load_trial(); return messagebox.showinfo("Opening Voucher","Opening voucher deleted")
+        if row.get("source_type")!="journal_voucher":
+            return messagebox.showwarning("General Journal","This system entry must be cancelled or reversed from its original module")
         if not messagebox.askyesno("Delete Journal Voucher",f"Delete {entry_number} and all its debit/credit lines?\nThis action is recorded in the audit log."): return
         try: self.client.delete_journal_voucher(row["entry_id"])
         except Exception as exc: return messagebox.showerror("Delete Journal Voucher",str(exc))
@@ -1697,7 +1729,8 @@ class SaberApp(tk.Tk):
         controls=tk.Frame(self.accounts_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=(10,0))
         self.new_account_code=tk.StringVar(); self.new_account_name=tk.StringVar(); self.new_account_parent=tk.StringVar(); self.new_account_type=tk.StringVar(value="expense")
         tk.Label(controls,text="Account (4-digit prefix = automatic):",bg=LIGHT,font=("Segoe UI",9,"bold"),fg=NAVY).pack(side="left",padx=(0,4))
-        tk.Entry(controls,textvariable=self.new_account_code,width=11).pack(side="left",padx=3)
+        self.new_account_code_entry=tk.Entry(controls,textvariable=self.new_account_code,width=11); self.new_account_code_entry.pack(side="left",padx=3)
+        self.new_account_code_entry.bind("<FocusOut>",self.preview_new_account_number); self.new_account_code_entry.bind("<Return>",self.preview_new_account_number)
         tk.Entry(controls,textvariable=self.new_account_name,width=22).pack(side="left",padx=3)
         tk.Entry(controls,textvariable=self.new_account_parent,width=9).pack(side="left",padx=3)
         ttk.Combobox(controls,textvariable=self.new_account_type,values=["asset","liability","equity","income","expense"],state="readonly",width=9).pack(side="left",padx=3)
@@ -1715,6 +1748,13 @@ class SaberApp(tk.Tk):
         except Exception as exc: return messagebox.showerror("Chart of Accounts",str(exc))
         self.new_account_code.set(""); self.new_account_name.set(""); self.new_account_parent.set(""); self.load_accounts()
         messagebox.showinfo("Chart of Accounts",f'Account {account["code"]} created successfully')
+
+    def preview_new_account_number(self,_event=None):
+        prefix=self.new_account_code.get().strip()
+        if len(prefix)!=4 or not prefix.isdigit(): return
+        try: number=self.client.next_account_number(prefix)
+        except Exception as exc: return messagebox.showwarning("Chart of Accounts",str(exc))
+        self.new_account_parent.set(prefix); self.new_account_code.set(number)
 
     def load_selected_account_name(self):
         selected=self.accounts_tree.selection()
@@ -1870,6 +1910,7 @@ class SaberApp(tk.Tk):
         self.account_search_box(filters,self.trial_account_to,16).pack(side="left",padx=3)
         ttk.Combobox(filters,textvariable=self.trial_scope,values=["Detailed Trial Balance","Main Account Summary"],state="readonly",width=20).pack(side="left",padx=4)
         ttk.Combobox(filters,textvariable=self.trial_display_currency,values=["USD Only","LBP Only","USD + LBP"],state="readonly",width=11).pack(side="left",padx=4)
+        ttk.Combobox(filters,textvariable=self.trial_posting_status,values=["Posted Only","Review Only","Both"],state="readonly",width=12).pack(side="left",padx=4)
         tk.Label(filters,text="Branch:",bg=LIGHT).pack(side="left"); self.branch_selector(filters,self.trial_branch,13,True).pack(side="left",padx=3)
         tk.Button(filters,text="Apply",command=self.apply_trial_date_filter,bg=GOLD,fg=NAVY,
                   font=("Segoe UI",9,"bold"),border=0,padx=16,pady=6).pack(side="left")
@@ -1909,7 +1950,8 @@ class SaberApp(tk.Tk):
         if date_range is None:
             return
         account_from=self.trial_account_from.get().split(" - ",1)[0].strip() or None; account_to=self.trial_account_to.get().split(" - ",1)[0].strip() or None
-        try: rows=self.client.trial_balance(*date_range,None,True,account_from,account_to,self.selected_branch_id(self.trial_branch))
+        posting={"Posted Only":"posted","Review Only":"review","Both":"both"}[self.trial_posting_status.get()]
+        try: rows=self.client.trial_balance(*date_range,None,True,account_from,account_to,self.selected_branch_id(self.trial_branch),posting)
         except Exception as exc: return messagebox.showerror("Error",str(exc))
         targets=["USD","LBP"] if self.trial_display_currency.get()=="USD + LBP" else ["USD" if self.trial_display_currency.get()=="USD Only" else "LBP"]
         displayed=[]

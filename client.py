@@ -45,6 +45,7 @@ class ApiClient:
     def professional_dashboard(self): return self.request("GET","/api/dashboard/professional")
     def invoices(self): return self.request("GET", "/api/invoices")["items"]
     def accounts(self): return self.request("GET", "/api/accounts")["items"]
+    def next_account_number(self,prefix): return self.request("GET",f"/api/accounts/next-number?{urlencode({'prefix':prefix})}")["account_number"]
     def save_account(self,item): return self.request("POST","/api/accounts",item)["account"]
     def rename_account(self,code,name): return self.request("PUT",f"/api/accounts/{code}",{"name_en":name})["account"]
     def parties(self): return self.request("GET", "/api/parties")["items"]
@@ -58,9 +59,9 @@ class ApiClient:
         return self.request("GET", f"/api/statement?{query}")
     def add_invoice_item(self, invoice_id, item):
         return self.request("POST", f"/api/invoices/{invoice_id}/items", {"item":item})["invoice"]
-    def trial_balance(self, from_date=None, to_date=None, account=None, include_subaccounts=True, account_from=None, account_to=None, branch_id=None):
+    def trial_balance(self, from_date=None, to_date=None, account=None, include_subaccounts=True, account_from=None, account_to=None, branch_id=None, posting_status="posted"):
         query = urlencode({key: value for key, value in {
-            "from_date": from_date, "to_date": to_date,"account":account,"include_subaccounts":"true" if include_subaccounts else "false","account_from":account_from,"account_to":account_to,"branch_id":branch_id
+            "from_date": from_date, "to_date": to_date,"account":account,"include_subaccounts":"true" if include_subaccounts else "false","account_from":account_from,"account_to":account_to,"branch_id":branch_id,"posting_status":posting_status
         }.items() if value})
         path = "/api/trial-balance" + (f"?{query}" if query else "")
         return self.request("GET", path)["items"]
@@ -75,6 +76,7 @@ class ApiClient:
     def update_invoice(self, invoice_id, invoice): return self.request("PUT", f"/api/invoices/{invoice_id}", {"invoice": invoice})
     def delete_invoice(self,invoice_id): return self.request("DELETE",f"/api/invoices/{invoice_id}")
     def delete_journal_voucher(self,entry_id): return self.request("DELETE",f"/api/journal/{entry_id}")
+    def delete_opening_voucher(self,entry_id): return self.request("DELETE",f"/api/opening-vouchers/{entry_id}")
     def journal_voucher(self,entry_id): return self.request("GET",f"/api/journal-vouchers/{entry_id}")
     def save_journal_voucher(self,voucher,lines,entry_id=None): return self.request("PUT" if entry_id else "POST",f"/api/journal-vouchers/{entry_id}" if entry_id else "/api/journal-vouchers",{"voucher":voucher,"lines":lines})
     def invoice_detail(self, invoice_id): return self.request("GET",f"/api/invoices/{invoice_id}/detail")

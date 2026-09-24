@@ -85,6 +85,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._json(200,attachment)
         if path == "/api/accounts":
             return self._json(200, {"items": self.db.list_accounts()})
+        if path == "/api/accounts/next-number":
+            query=parse_qs(parsed.query)
+            try: return self._json(200,{"account_number":self.db.next_account_number(query.get("prefix",[""])[0])})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
         if path == "/api/parties":
             return self._json(200, {"items": self.db.list_parties()})
         if path == "/api/branches": return self._json(200,{"items":self.db.list_branches()})
@@ -136,7 +140,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             to_date = query.get("to_date", [None])[0]
             return self._json(200, {"items": self.db.trial_balance(from_date, to_date,
                 query.get("account",[None])[0],query.get("include_subaccounts",["true"])[0].lower()=="true",
-                query.get("account_from",[None])[0],query.get("account_to",[None])[0],query.get("branch_id",[None])[0])})
+                query.get("account_from",[None])[0],query.get("account_to",[None])[0],query.get("branch_id",[None])[0],query.get("posting_status",["posted"])[0])})
         if path == "/api/journal":
             query = parse_qs(parsed.query)
             return self._json(200, {"items": self.db.journal(
@@ -186,7 +190,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"company":result})
         self._select_database()
-        if self.headers.get("X-Company-ID") and self.headers.get("X-Fiscal-Year") and self.company_manager.year_status(self.headers.get("X-Company-ID"),self.headers.get("X-Fiscal-Year"))=="closed":
+        fiscal_admin_paths=("/api/fiscal-years/reopen","/api/fiscal-years/refresh-opening")
+        if path not in fiscal_admin_paths and self.headers.get("X-Company-ID") and self.headers.get("X-Fiscal-Year") and self.company_manager.year_status(self.headers.get("X-Company-ID"),self.headers.get("X-Fiscal-Year"))=="closed":
             return self._json(423,{"error":"This fiscal year is closed and read-only"})
         if user["role"] == "viewer":
             return self._json(403,{"error":"Viewer access is read-only"})
@@ -395,6 +400,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             if path.startswith("/api/invoices/"): result=self.db.delete_invoice(int(path.rsplit("/",1)[-1]),user["id"])
             elif path.startswith("/api/journal/"): result=self.db.delete_journal_voucher(int(path.rsplit("/",1)[-1]),user["id"])
+            elif path.startswith("/api/opening-vouchers/"):
+                if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+                result=self.db.delete_opening_voucher(int(path.rsplit("/",1)[-1]),user["id"])
             else: return self._json(404,{"error":"Not found"})
         except KeyError: return self._json(404,{"error":"Entry not found"})
         except Exception as exc: return self._json(400,{"error":str(exc)})
