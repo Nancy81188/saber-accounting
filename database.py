@@ -59,6 +59,28 @@ CREATE TABLE IF NOT EXISTS invoice_attachments (
  file_name TEXT NOT NULL, mime_type TEXT NOT NULL, content BLOB NOT NULL,
  uploaded_by INTEGER REFERENCES users(id), uploaded_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS party_documents (
+ id INTEGER PRIMARY KEY, party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+ document_type TEXT NOT NULL, issue_date TEXT, expiry_date TEXT, notes TEXT,
+ file_name TEXT NOT NULL, mime_type TEXT NOT NULL, content BLOB NOT NULL,
+ uploaded_by INTEGER REFERENCES users(id), uploaded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS document_cases (
+ id INTEGER PRIMARY KEY, case_number TEXT NOT NULL UNIQUE,
+ case_type TEXT NOT NULL CHECK(case_type IN ('purchase','expense','customs')),
+ document_date TEXT NOT NULL, party_id INTEGER REFERENCES parties(id), currency TEXT NOT NULL DEFAULT 'USD',
+ reference TEXT, description TEXT, customs_declaration_no TEXT, broker_name TEXT,
+ supplier_invoice_amount TEXT NOT NULL DEFAULT '0', freight TEXT NOT NULL DEFAULT '0', insurance TEXT NOT NULL DEFAULT '0',
+ customs_duties TEXT NOT NULL DEFAULT '0', import_vat TEXT NOT NULL DEFAULT '0', broker_fees TEXT NOT NULL DEFAULT '0',
+ total TEXT NOT NULL DEFAULT '0', status TEXT NOT NULL DEFAULT 'draft', invoice_id INTEGER REFERENCES invoices(id),
+ supplier_account TEXT, expense_account TEXT, vat_account TEXT, branch_id INTEGER REFERENCES branches(id),
+ created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS case_attachments (
+ id INTEGER PRIMARY KEY, case_id INTEGER NOT NULL REFERENCES document_cases(id) ON DELETE CASCADE,
+ document_role TEXT NOT NULL, file_name TEXT NOT NULL, mime_type TEXT NOT NULL, content BLOB NOT NULL,
+ uploaded_by INTEGER REFERENCES users(id), uploaded_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS journal_entries (
  id INTEGER PRIMARY KEY, entry_number TEXT NOT NULL UNIQUE, entry_date TEXT, description TEXT, source_type TEXT,
  source_id INTEGER, currency TEXT NOT NULL, branch_id INTEGER REFERENCES branches(id), created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL
@@ -932,6 +954,128 @@ class Database:
             row = db.execute("SELECT * FROM invoice_attachments WHERE id=?", (attachment_id,)).fetchone()
             if not row: raise KeyError(attachment_id)
             return dict(row)
+
+    def add_party_document(self,party_id,item,content,user_id):
+        file_name=str(item.get("file_name") or "").strip()
+        if not file_name or not content: raise ValueError("Choose a legal document file")
+        if len(content)>15*1024*1024: raise ValueError("Document cannot exceed 15 MB")
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM parties WHERE id=?",(int(party_id),)).fetchone(): raise KeyError(party_id)
+            result=db.execute("""INSERT INTO party_documents(party_id,document_type,issue_date,expiry_date,notes,file_name,mime_type,content,uploaded_by,uploaded_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",(int(party_id),str(item.get("document_type") or "Other"),item.get("issue_date") or None,item.get("expiry_date") or None,
+                str(item.get("notes") or ""),file_name,str(item.get("mime_type") or "application/octet-stream"),content,user_id,utcnow()))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"attach","party",int(party_id),json.dumps({"document_type":item.get("document_type"),"file_name":file_name}),utcnow()))
+            return result.lastrowid
+
+    def list_party_documents(self,party_id):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT id,party_id,document_type,issue_date,expiry_date,notes,file_name,mime_type,length(content) size,uploaded_at
+                FROM party_documents WHERE party_id=? ORDER BY id DESC""",(int(party_id),))]
+
+    def get_party_document(self,document_id):
+        with self.connect() as db:
+            row=db.execute("SELECT * FROM party_documents WHERE id=?",(int(document_id),)).fetchone()
+            if not row: raise KeyError(document_id)
+            return dict(row)
+
+    def next_document_case_number(self,case_type,document_date):
+        kind=str(case_type or "purchase").lower(); prefix={"purchase":"PUR","expense":"EXP","customs":"CUS"}.get(kind)
+        if not prefix: raise ValueError("Case type must be Purchase, Expense, or Customs")
+        year=datetime.now().year
+        for pattern in ("%d-%m-%Y","%Y-%m-%d","%d%m%Y"):
+            try: year=datetime.strptime(str(document_date),pattern).year; break
+            except ValueError: pass
+        with self.connect() as db:
+            rows=db.execute("SELECT case_number FROM document_cases WHERE case_number LIKE ?",(f"{prefix}-{year}-%",)).fetchall()
+        sequences=[]
+        for row in rows:
+            try: sequences.append(int(str(row["case_number"]).rsplit("-",1)[-1]))
+            except ValueError: pass
+        return f"{prefix}-{year}-{max(sequences,default=0)+1:06d}"
+
+    def save_document_case(self,item,user_id):
+        case_type=str(item.get("case_type") or "purchase").lower()
+        if case_type not in ("purchase","expense","customs"): raise ValueError("Invalid document case type")
+        document_date=str(item.get("document_date") or "").strip(); self._assert_period_open(document_date)
+        party_id=int(item.get("party_id") or 0)
+        currency=str(item.get("currency") or "USD").upper()
+        if currency not in ("USD","EUR","LBP","AED"): raise ValueError("Invalid currency")
+        amounts={key:Decimal(str(item.get(key) or 0)) for key in ("supplier_invoice_amount","freight","insurance","customs_duties","import_vat","broker_fees")}
+        if min(amounts.values())<0: raise ValueError("Case amounts cannot be negative")
+        if case_type!="customs":
+            amounts["freight"]=amounts["insurance"]=amounts["customs_duties"]=amounts["broker_fees"]=Decimal("0")
+        total=sum(amounts.values())
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM parties WHERE id=?",(party_id,)).fetchone(): raise ValueError("Choose a customer or supplier")
+            case_number=str(item.get("case_number") or "").strip() or self.next_document_case_number(case_type,document_date)
+            result=db.execute("""INSERT INTO document_cases(case_number,case_type,document_date,party_id,currency,reference,description,customs_declaration_no,broker_name,
+                supplier_invoice_amount,freight,insurance,customs_duties,import_vat,broker_fees,total,status,supplier_account,expense_account,vat_account,branch_id,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(case_number,case_type,document_date,party_id,currency,str(item.get("reference") or ""),str(item.get("description") or ""),
+                str(item.get("customs_declaration_no") or ""),str(item.get("broker_name") or ""),*[str(amounts[key]) for key in ("supplier_invoice_amount","freight","insurance","customs_duties","import_vat","broker_fees")],
+                str(total),"draft",str(item.get("supplier_account") or ""),str(item.get("expense_account") or EXPENSE_ACCOUNT_9),str(item.get("vat_account") or VAT_ACCOUNT_9),self._branch_id(db,item),user_id,utcnow()))
+            case_id=result.lastrowid
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",(user_id,"create","document_case",case_id,json.dumps({"case_number":case_number,"type":case_type}),utcnow()))
+        return self.document_case(case_id)
+
+    def add_case_attachment(self,case_id,role,file_name,mime_type,content,user_id):
+        if not file_name or not content: raise ValueError("Choose a document file")
+        if len(content)>15*1024*1024: raise ValueError("Document cannot exceed 15 MB")
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM document_cases WHERE id=?",(int(case_id),)).fetchone(): raise KeyError(case_id)
+            return db.execute("INSERT INTO case_attachments(case_id,document_role,file_name,mime_type,content,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?,?)",
+                (int(case_id),str(role or "other"),str(file_name),str(mime_type or "application/octet-stream"),content,user_id,utcnow())).lastrowid
+
+    def list_document_cases(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""SELECT c.*,p.name party_name,COALESCE(b.name,'Head Office') branch_name,
+                (SELECT COUNT(*) FROM case_attachments a WHERE a.case_id=c.id) attachment_count
+                FROM document_cases c LEFT JOIN parties p ON p.id=c.party_id LEFT JOIN branches b ON b.id=c.branch_id ORDER BY c.id DESC""")]
+
+    def document_case(self,case_id):
+        row=next((row for row in self.list_document_cases() if row["id"]==int(case_id)),None)
+        if not row: raise KeyError(case_id)
+        return row
+
+    def list_case_attachments(self,case_id):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("SELECT id,document_role,file_name,mime_type,length(content) size,uploaded_at FROM case_attachments WHERE case_id=? ORDER BY id",(int(case_id),))]
+
+    def get_case_attachment(self,attachment_id):
+        with self.connect() as db:
+            row=db.execute("SELECT * FROM case_attachments WHERE id=?",(int(attachment_id),)).fetchone()
+            if not row: raise KeyError(attachment_id)
+            return dict(row)
+
+    def post_document_case(self,case_id,user_id):
+        case=self.document_case(case_id)
+        if case["status"]=="posted": raise ValueError("Document case is already posted")
+        attachments=self.list_case_attachments(case_id)
+        required={"purchase":{"supplier_invoice"},"expense":{"expense_document"},"customs":{"supplier_invoice","customs_declaration","broker_invoice"}}[case["case_type"]]
+        missing=required-{row["document_role"] for row in attachments}
+        if missing: raise ValueError("Attach required document(s): "+", ".join(sorted(missing)))
+        base=Decimal(str(case["supplier_invoice_amount"]))+Decimal(str(case["freight"]))+Decimal(str(case["insurance"]))+Decimal(str(case["customs_duties"]))+Decimal(str(case["broker_fees"]))
+        vat=Decimal(str(case["import_vat"])); items=[]
+        components=(("Supplier invoice",case["supplier_invoice_amount"]),("Freight",case["freight"]),("Insurance",case["insurance"]),("Customs duties",case["customs_duties"]),("Customs broker fees",case["broker_fees"]))
+        for description,amount in components:
+            if Decimal(str(amount)):
+                items.append({"description":description,"quantity":1,"unit_price":amount,"deductible_subtotal":amount,"vat_rate":0,"vat":0})
+        if not items: raise ValueError("Enter an amount before posting")
+        party=next(row for row in self.list_parties() if row["id"]==case["party_id"])
+        invoice={"invoice_number":case["reference"] or case["case_number"],"invoice_date":case["document_date"],"party_name":party["name"],
+            "kind":"expenses" if case["case_type"]=="expense" else "purchases","currency":case["currency"],"supplier_account":case["supplier_account"],
+            "expense_account":case["expense_account"],"vat_account":case["vat_account"],"status":"posted","branch_id":case["branch_id"],
+            "source_file":f'{case["case_type"].title()} Case',"description":case["description"]}
+        if vat:
+            items[0]["vat"]=str(vat); items[0]["vat_rate"]=str((vat/base*Decimal("100")) if base else 0)
+        invoice_id=self.create_manual_invoice(invoice,items,user_id)
+        with self.connect() as db:
+            db.execute("UPDATE document_cases SET status='posted',invoice_id=? WHERE id=?",(invoice_id,int(case_id)))
+            for row in db.execute("SELECT * FROM case_attachments WHERE case_id=?",(int(case_id),)):
+                db.execute("INSERT INTO invoice_attachments(invoice_id,file_name,mime_type,content,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",
+                    (invoice_id,row["file_name"],row["mime_type"],row["content"],user_id,utcnow()))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",(user_id,"post","document_case",int(case_id),json.dumps({"invoice_id":invoice_id}),utcnow()))
+        return self.document_case(case_id)
 
     def invoice_history(self, invoice_id):
         with self.connect() as db:
