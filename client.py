@@ -126,6 +126,12 @@ class ApiClient:
     def vat_report(self, from_date=None, to_date=None, currency=None):
         query=urlencode({k:v for k,v in {"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v})
         return self.request("GET","/api/vat-report"+(f"?{query}" if query else ""))
+    def cash_flow(self,from_date=None,to_date=None,currency=None):
+        query=urlencode({k:v for k,v in {"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v}); return self.request("GET","/api/cash-flow"+(f"?{query}" if query else ""))["items"]
+    def aging(self,as_of_date=None,kind=None,currency=None):
+        query=urlencode({k:v for k,v in {"as_of_date":as_of_date,"kind":kind,"currency":currency}.items() if v}); return self.request("GET","/api/aging"+(f"?{query}" if query else ""))["items"]
+    def comparative_reports(self,from_date,to_date,currency=None):
+        query=urlencode({k:v for k,v in {"from_date":from_date,"to_date":to_date,"currency":currency}.items() if v}); return self.request("GET",f"/api/comparative-reports?{query}")
     def users(self): return self.request("GET","/api/users")["items"]
     def save_user(self,item): return self.request("POST","/api/users",item)["user"]
     def backups(self): return self.request("GET","/api/backups")["items"]
