@@ -1710,6 +1710,58 @@ class Database:
                     "debit":float(-result) if result<0 else 0.0,"credit":float(result) if result>0 else 0.0,"balance":float(-result)})
         return rows
 
+    def cash_flow(self,from_date=None,to_date=None,currency=None):
+        rows=self.journal(from_date,to_date,currency,limit=50000)
+        cash_rows=[row for row in rows if str(row["account_code"]).startswith(("51","53"))]
+        grouped={}
+        for row in cash_rows:
+            source=row.get("source_type") or "other"
+            category={"invoice":"Operating - Invoices","expense":"Operating - Expenses","payroll":"Operating - Payroll",
+                "payment":"Operating - Receipts / Payments","opening":"Opening Balance","year_close":"Year Closing"}.get(source,"Other Cash Movement")
+            key=(row["currency"],category); item=grouped.setdefault(key,{"currency":row["currency"],"category":category,"inflow":0.0,"outflow":0.0,"net":0.0})
+            movement=float(row["debit"] or 0)-float(row["credit"] or 0)
+            if movement>=0: item["inflow"]+=movement
+            else: item["outflow"]+=-movement
+            item["net"]+=movement
+        return sorted(grouped.values(),key=lambda row:(row["currency"],row["category"]))
+
+    def aging_report(self,as_of_date=None,kind=None,currency=None):
+        as_of=datetime.now().date()
+        if as_of_date:
+            for pattern in ("%Y-%m-%d","%d-%m-%Y"):
+                try: as_of=datetime.strptime(as_of_date,pattern).date(); break
+                except ValueError: pass
+        conditions=["i.status='posted'","CAST(i.total AS REAL)>CAST(i.amount_paid AS REAL)"] ; parameters=[]
+        if kind in ("sale","purchase"): conditions.append("i.kind=?"); parameters.append(kind)
+        if currency: conditions.append("i.currency=?"); parameters.append(currency)
+        with self.connect() as db:
+            rows=[dict(row) for row in db.execute(f"""SELECT i.id,i.invoice_number,i.invoice_date,i.due_date,i.kind,i.currency,p.name party_name,
+                CAST(i.total AS REAL)-CAST(i.amount_paid AS REAL) outstanding FROM invoices i LEFT JOIN parties p ON p.id=i.party_id
+                WHERE {' AND '.join(conditions)} ORDER BY p.name,i.due_date,i.invoice_date""",parameters)]
+        for row in rows:
+            raw=row.get("due_date") or row.get("invoice_date"); due=as_of
+            for pattern in ("%d-%m-%Y","%Y-%m-%d"):
+                try: due=datetime.strptime(str(raw),pattern).date(); break
+                except ValueError: pass
+            days=max(0,(as_of-due).days); row["days_overdue"]=days
+            row["bucket"]="Current" if days==0 else "1-30" if days<=30 else "31-60" if days<=60 else "61-90" if days<=90 else "Over 90"
+        return rows
+
+    def comparative_reports(self,from_date,to_date,currency=None):
+        start=datetime.strptime(from_date,"%Y-%m-%d"); end=datetime.strptime(to_date,"%Y-%m-%d")
+        try: prior_start=start.replace(year=start.year-1).strftime("%Y-%m-%d")
+        except ValueError: prior_start=start.replace(year=start.year-1,day=28).strftime("%Y-%m-%d")
+        try: prior_end=end.replace(year=end.year-1).strftime("%Y-%m-%d")
+        except ValueError: prior_end=end.replace(year=end.year-1,day=28).strftime("%Y-%m-%d")
+        current=self.profit_and_loss(from_date,to_date,currency); prior=self.profit_and_loss(prior_start,prior_end,currency)
+        combined={}
+        for label,rows in (("current",current),("prior",prior)):
+            for row in rows:
+                key=(row["currency"],row["code"],row["name_en"],row["type"]); item=combined.setdefault(key,{"currency":row["currency"],"code":row["code"],"name_en":row["name_en"],"type":row["type"],"current":0.0,"prior":0.0,"variance":0.0})
+                item[label]+=float(row["amount"] or 0)
+        for row in combined.values(): row["variance"]=row["current"]-row["prior"]
+        return {"from_date":from_date,"to_date":to_date,"prior_from":prior_start,"prior_to":prior_end,"items":sorted(combined.values(),key=lambda row:(row["currency"],row["code"]))}
+
     def vat_report(self, from_date=None, to_date=None, currency=None):
         normalized="""CASE WHEN invoice_date GLOB '??-??-????'
             THEN substr(invoice_date,7,4)||'-'||substr(invoice_date,4,2)||'-'||substr(invoice_date,1,2)
