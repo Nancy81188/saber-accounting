@@ -6,7 +6,7 @@ from database import Database
 from importer import read_invoices
 from lebanese_accounts import LEBANESE_ACCOUNTS
 from report_export import export_excel, export_invoice_pdf, export_pdf
-from desktop import natural_sort_value, row_matches_search, sortable_date
+from desktop import formatted_user_date, natural_sort_value, parse_user_date, row_matches_search, sortable_date
 from company_manager import CompanyManager
 from run_desktop import local_server_ready
 
@@ -19,6 +19,8 @@ class SaberAccountingTest(unittest.TestCase):
         self.assertEqual(sorted(dates,key=sortable_date),["15-06-2024","31-12-2025","01-01-2026"])
         numbers=["JV-10","2","11","1"]
         self.assertEqual(sorted(numbers,key=natural_sort_value)[:3],["1","2","11"])
+        self.assertEqual(formatted_user_date("31122024"),"31-12-2024")
+        self.assertEqual(parse_user_date("01012025").year,2025)
 
     def test_table_search_matches_all_terms_across_columns(self):
         row=("INV-100","22-09-2026","Supplier Alpha","purchase","USD",100,11,111)

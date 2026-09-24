@@ -35,6 +35,16 @@ def sortable_date(value):
         except ValueError: pass
     return datetime.min
 
+def parse_user_date(value):
+    text=str(value or "").strip()
+    for pattern in ("%d-%m-%Y","%d%m%Y","%Y-%m-%d","%Y%m%d"):
+        try: return datetime.strptime(text,pattern)
+        except ValueError: pass
+    raise ValueError("Date must contain 8 digits: DDMMYYYY")
+
+def formatted_user_date(value):
+    return parse_user_date(value).strftime("%d-%m-%Y")
+
 def natural_sort_value(value):
     text=str(value or "").strip()
     try: return (0,float(text.replace(",","")))
@@ -93,6 +103,16 @@ class SaberApp(tk.Tk):
 
     def clear(self):
         for child in self.winfo_children(): child.destroy()
+
+    def date_entry(self,parent,variable,width=13):
+        entry=tk.Entry(parent,textvariable=variable,width=width)
+        def normalize(_event=None):
+            value=variable.get().strip()
+            if not value: return
+            try: variable.set(formatted_user_date(value))
+            except ValueError: pass
+        entry.bind("<FocusOut>",normalize); entry.bind("<Return>",normalize)
+        return entry
 
     def login_screen(self):
         self.clear()
@@ -463,6 +483,8 @@ class SaberApp(tk.Tk):
                 self.account_search_box(frame,variables[key],18).pack(side="left")
                 ttk.Combobox(frame,textvariable=variables[side_key],values=["D - Debit","C - Credit"],state="readonly",width=10).pack(side="left",padx=(5,0))
                 widget=frame
+            elif key in ("invoice_date","due_date"):
+                widget=self.date_entry(window,variables[key],27)
             else:
                 widget=tk.Entry(window,textvariable=variables[key],width=27)
             widget.grid(row=grid_row,column=grid_column+1,padx=(5,14),pady=8)
@@ -472,12 +494,9 @@ class SaberApp(tk.Tk):
             if not all(values[key] for key in ("invoice_number","invoice_date","party_name")):
                 return messagebox.showwarning("Invoices","Invoice number, date, and customer/supplier are required",parent=window)
             try:
-                datetime.strptime(values["invoice_date"],"%d-%m-%Y")
-            except ValueError:
-                try:
-                    datetime.strptime(values["invoice_date"],"%Y-%m-%d")
-                except ValueError:
-                    return messagebox.showwarning("Invoices","Date must use DD-MM-YYYY",parent=window)
+                values["invoice_date"]=formatted_user_date(values["invoice_date"])
+                if values.get("due_date"): values["due_date"]=formatted_user_date(values["due_date"])
+            except ValueError: return messagebox.showwarning("Invoices","Enter 8 date digits: DDMMYYYY",parent=window)
             try:
                 deductible=float(values["deductible_subtotal"]); non_deductible=float(values["non_deductible_subtotal"]); subtotal=deductible+non_deductible; vat=float(values["vat"]); total=float(values["total"])
                 amount_paid=float(values["amount_paid"] or 0)
@@ -646,12 +665,14 @@ class SaberApp(tk.Tk):
             elif key=="payment_method": widget=ttk.Combobox(window,textvariable=variables[key],values=["Cash","Bank Transfer","Cheque","Card","Other"],state="readonly",width=24)
             elif key=="branch": widget=self.branch_selector(window,variables[key],24,False)
             elif key in ("supplier_account","vat_account","expense_account","expense_no_vat_account"): widget=self.account_search_box(window,variables[key],24)
+            elif key in ("invoice_date","due_date"): widget=self.date_entry(window,variables[key],27)
             else: widget=tk.Entry(window,textvariable=variables[key],width=27)
             widget.grid(row=rr,column=cc+1,padx=(5,14),pady=7)
         def save():
             values={key:var.get().strip() for key,var in variables.items()}
             try:
-                datetime.strptime(values["invoice_date"],"%d-%m-%Y")
+                values["invoice_date"]=formatted_user_date(values["invoice_date"])
+                if values.get("due_date"): values["due_date"]=formatted_user_date(values["due_date"])
                 deductible=float(values["deductible_subtotal"]); non_deductible=float(values["non_deductible_subtotal"]); subtotal=deductible+non_deductible; vat=float(values["vat"]); total=float(values["total"])
             except ValueError:
                 return messagebox.showwarning("Invoices","Check the date and amounts",parent=window)
@@ -900,7 +921,8 @@ class SaberApp(tk.Tk):
         self.manual_no=tk.StringVar(); self.manual_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y")); self.manual_description=tk.StringVar(); self.manual_currency=tk.StringVar(value="USD")
         for column,(label,var,width) in enumerate((("Voucher Number",self.manual_no,18),("Date",self.manual_date,14),("Description",self.manual_description,32))):
             tk.Label(header,text=label,bg=LIGHT).grid(row=0,column=column*2,sticky="w",padx=4)
-            tk.Entry(header,textvariable=var,width=width,state="readonly" if label=="Voucher Number" else "normal").grid(row=0,column=column*2+1,padx=4)
+            widget=self.date_entry(header,var,width) if label=="Date" else tk.Entry(header,textvariable=var,width=width,state="readonly" if label=="Voucher Number" else "normal")
+            widget.grid(row=0,column=column*2+1,padx=4)
         tk.Label(header,text="Automatic after Save",bg=LIGHT,fg="#5f6b76",font=("Segoe UI",8)).grid(row=2,column=1,sticky="w",padx=4)
         ttk.Combobox(header,textvariable=self.manual_currency,values=["USD","EUR","LBP","AED"],state="readonly",width=8).grid(row=0,column=6,padx=5)
         tk.Label(header,text="Branch",bg=LIGHT).grid(row=1,column=0,sticky="w",padx=4,pady=(7,0)); self.branch_selector(header,self.manual_branch,22,False).grid(row=1,column=1,padx=4,pady=(7,0))
@@ -970,7 +992,9 @@ class SaberApp(tk.Tk):
         debit,credit=self.update_manual_totals()
         if len(self.manual_items)<2: return messagebox.showwarning("Journal Voucher","Add at least two debit/credit lines")
         if abs(debit-credit)>=.005: return messagebox.showerror("Unbalanced Journal Voucher",f"Total Debit: {debit:,.2f}\nTotal Credit: {credit:,.2f}\nDebit must equal Credit before saving.")
-        voucher={"entry_number":self.manual_no.get().strip(),"entry_date":self.manual_date.get().strip(),"description":self.manual_description.get().strip(),"currency":self.manual_currency.get(),"branch":self.manual_branch.get()}
+        try: entry_date=formatted_user_date(self.manual_date.get())
+        except ValueError: return messagebox.showwarning("Journal Voucher","Enter 8 date digits: DDMMYYYY")
+        voucher={"entry_number":self.manual_no.get().strip(),"entry_date":entry_date,"description":self.manual_description.get().strip(),"currency":self.manual_currency.get(),"branch":self.manual_branch.get()}
         for line in self.manual_items: line["description"]=voucher["description"]
         try: saved=self.client.save_journal_voucher(voucher,self.manual_items,self.editing_voucher_id)
         except Exception as exc: return messagebox.showerror("Journal Voucher",str(exc))
@@ -1303,9 +1327,9 @@ class SaberApp(tk.Tk):
         if not self.journal_view_year.get(): self.journal_view_year.set(str(getattr(self,"current_fiscal_year",datetime.now().year)))
         ttk.Combobox(filters,textvariable=self.journal_view_year,values=years,state="readonly",width=7).pack(side="left",padx=(4,10))
         tk.Label(filters,text="From Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
-        tk.Entry(filters,textvariable=self.journal_from_date,width=13).pack(side="left",padx=(5,14))
+        self.date_entry(filters,self.journal_from_date,13).pack(side="left",padx=(5,14))
         tk.Label(filters,text="To Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
-        tk.Entry(filters,textvariable=self.journal_to_date,width=13).pack(side="left",padx=(5,10))
+        self.date_entry(filters,self.journal_to_date,13).pack(side="left",padx=(5,10))
         tk.Label(filters,text="DD-MM-YYYY",bg=LIGHT,fg="#5f6b76").pack(side="left",padx=(0,10))
         tk.Label(filters,text="Sort By:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
         ttk.Combobox(filters,textvariable=self.journal_sort_by,state="readonly",width=16,
@@ -1335,7 +1359,7 @@ class SaberApp(tk.Tk):
             value=raw.strip()
             if not value:
                 values.append(None); continue
-            try: values.append(datetime.strptime(value,"%d-%m-%Y").strftime("%Y-%m-%d"))
+            try: values.append(parse_user_date(value).strftime("%Y-%m-%d"))
             except ValueError:
                 messagebox.showwarning("General Journal",f"{label} must use DD-MM-YYYY"); return None
         if values[0] and values[1] and values[0]>values[1]:
@@ -1403,9 +1427,9 @@ class SaberApp(tk.Tk):
     def build_profit_loss(self):
         controls=tk.Frame(self.pnl_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=10)
         tk.Label(controls,text="From:",bg=LIGHT).pack(side="left")
-        tk.Entry(controls,textvariable=self.pnl_from_date,width=13).pack(side="left",padx=(4,10))
+        self.date_entry(controls,self.pnl_from_date,13).pack(side="left",padx=(4,10))
         tk.Label(controls,text="To:",bg=LIGHT).pack(side="left")
-        tk.Entry(controls,textvariable=self.pnl_to_date,width=13).pack(side="left",padx=(4,10))
+        self.date_entry(controls,self.pnl_to_date,13).pack(side="left",padx=(4,10))
         tk.Button(controls,text="Apply",command=self.load_profit_loss,bg=GOLD,fg=NAVY,border=0,padx=15,pady=6).pack(side="left")
         tk.Label(controls,text="Close Fiscal Year:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="right",padx=(10,4))
         tk.Entry(controls,textvariable=self.close_year,width=8).pack(side="right")
@@ -1424,7 +1448,7 @@ class SaberApp(tk.Tk):
     def profit_loss_range(self):
         values=[]
         for label,raw in (("From Date",self.pnl_from_date.get()),("To Date",self.pnl_to_date.get())):
-            try: values.append(datetime.strptime(raw.strip(),"%d-%m-%Y").strftime("%Y-%m-%d"))
+            try: values.append(parse_user_date(raw).strftime("%Y-%m-%d"))
             except ValueError: messagebox.showwarning("Profit & Loss",f"{label} must use DD-MM-YYYY"); return None
         if values[0]>values[1]: messagebox.showwarning("Profit & Loss","From Date cannot be after To Date"); return None
         return values
@@ -1498,8 +1522,8 @@ class SaberApp(tk.Tk):
 
     def build_financial_reports(self):
         controls=tk.Frame(self.reports_tab,bg=LIGHT); controls.pack(fill="x",padx=10,pady=10)
-        tk.Label(controls,text="From:",bg=LIGHT).pack(side="left"); tk.Entry(controls,textvariable=self.report_from_date,width=13).pack(side="left",padx=(4,10))
-        tk.Label(controls,text="To:",bg=LIGHT).pack(side="left"); tk.Entry(controls,textvariable=self.report_to_date,width=13).pack(side="left",padx=(4,10))
+        tk.Label(controls,text="From:",bg=LIGHT).pack(side="left"); self.date_entry(controls,self.report_from_date,13).pack(side="left",padx=(4,10))
+        tk.Label(controls,text="To:",bg=LIGHT).pack(side="left"); self.date_entry(controls,self.report_to_date,13).pack(side="left",padx=(4,10))
         tk.Label(controls,text="Account From:",bg=LIGHT).pack(side="left"); self.account_search_box(controls,self.report_account_from,16).pack(side="left",padx=(4,6))
         tk.Label(controls,text="To:",bg=LIGHT).pack(side="left"); self.account_search_box(controls,self.report_account_to,16).pack(side="left",padx=(4,10))
         tk.Button(controls,text="Apply",command=self.load_financial_reports,bg=GOLD,fg=NAVY,border=0,padx=15,pady=6).pack(side="left")
@@ -1524,7 +1548,7 @@ class SaberApp(tk.Tk):
     def financial_report_range(self):
         values=[]
         for raw in (self.report_from_date.get(),self.report_to_date.get()):
-            try: values.append(datetime.strptime(raw.strip(),"%d-%m-%Y").strftime("%Y-%m-%d"))
+            try: values.append(parse_user_date(raw).strftime("%Y-%m-%d"))
             except ValueError: messagebox.showwarning("Financial Reports","Dates must use DD-MM-YYYY"); return None
         if values[0]>values[1]: messagebox.showwarning("Financial Reports","From Date cannot be after To Date"); return None
         return values
@@ -1572,9 +1596,9 @@ class SaberApp(tk.Tk):
         self.statement_party_combo.bind("<<ComboboxSelected>>",lambda _event:self.load_statement())
         tk.Button(controls,text="Refresh Parties",command=self.refresh_statement_parties,bg=NAVY,fg="white",border=0,padx=10,pady=5).pack(side="left",padx=3)
         tk.Label(controls,text="From:",bg=LIGHT).pack(side="left",padx=(8,2))
-        tk.Entry(controls,textvariable=self.statement_from_date,width=12).pack(side="left")
+        self.date_entry(controls,self.statement_from_date,12).pack(side="left")
         tk.Label(controls,text="To:",bg=LIGHT).pack(side="left",padx=(8,2))
-        tk.Entry(controls,textvariable=self.statement_to_date,width=12).pack(side="left")
+        self.date_entry(controls,self.statement_to_date,12).pack(side="left")
         ttk.Combobox(controls,textvariable=self.statement_currency,values=["All Currencies","USD","EUR","LBP","AED"],state="readonly",width=14).pack(side="left",padx=8)
         ttk.Combobox(controls,textvariable=self.statement_display_currency,values=["Original","USD","LBP"],state="readonly",width=9).pack(side="left",padx=3)
         tk.Checkbutton(controls,text="With Opening",variable=self.statement_include_opening,bg=LIGHT).pack(side="left",padx=3)
@@ -1614,7 +1638,7 @@ class SaberApp(tk.Tk):
         result=[]
         for label,value in (("From Date",self.statement_from_date.get().strip()),("To Date",self.statement_to_date.get().strip())):
             if not value: result.append(None); continue
-            try: result.append(datetime.strptime(value,"%d-%m-%Y").strftime("%Y-%m-%d"))
+            try: result.append(parse_user_date(value).strftime("%Y-%m-%d"))
             except ValueError:
                 messagebox.showwarning("Statement",f"{label} must use DD-MM-YYYY"); return None
         if result[0] and result[1] and result[0]>result[1]:
@@ -1726,8 +1750,8 @@ class SaberApp(tk.Tk):
         self.backups_tree=self.table(backups,[("name","Backup File",360),("size","Size",120),("modified","Created",180)])
         rate_controls=tk.Frame(rates,bg=LIGHT); rate_controls.pack(fill="x",padx=10,pady=10)
         self.rate_date=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y")); self.rate_date_to=tk.StringVar(value=datetime.now().strftime("%d-%m-%Y")); self.rate_from=tk.StringVar(value="USD"); self.rate_to=tk.StringVar(value="LBP"); self.rate_value=tk.StringVar(value="1")
-        tk.Label(rate_controls,text="Date From",bg=LIGHT).pack(side="left"); tk.Entry(rate_controls,textvariable=self.rate_date,width=12).pack(side="left",padx=4)
-        tk.Label(rate_controls,text="Date To",bg=LIGHT).pack(side="left"); tk.Entry(rate_controls,textvariable=self.rate_date_to,width=12).pack(side="left",padx=4)
+        tk.Label(rate_controls,text="Date From",bg=LIGHT).pack(side="left"); self.date_entry(rate_controls,self.rate_date,12).pack(side="left",padx=4)
+        tk.Label(rate_controls,text="Date To",bg=LIGHT).pack(side="left"); self.date_entry(rate_controls,self.rate_date_to,12).pack(side="left",padx=4)
         ttk.Combobox(rate_controls,textvariable=self.rate_from,values=["USD","EUR","LBP","AED"],state="readonly",width=7).pack(side="left",padx=4)
         tk.Label(rate_controls,text="to",bg=LIGHT).pack(side="left")
         ttk.Combobox(rate_controls,textvariable=self.rate_to,values=["USD","EUR","LBP","AED"],state="readonly",width=7).pack(side="left",padx=4)
@@ -1828,9 +1852,9 @@ class SaberApp(tk.Tk):
     def build_trial(self):
         filters=tk.Frame(self.trial_tab,bg=LIGHT); filters.pack(fill="x",padx=10,pady=(10,0))
         tk.Label(filters,text="From Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
-        tk.Entry(filters,textvariable=self.trial_from_date,width=13).pack(side="left",padx=(5,14))
+        self.date_entry(filters,self.trial_from_date,13).pack(side="left",padx=(5,14))
         tk.Label(filters,text="To Date:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
-        tk.Entry(filters,textvariable=self.trial_to_date,width=13).pack(side="left",padx=(5,10))
+        self.date_entry(filters,self.trial_to_date,13).pack(side="left",padx=(5,10))
         tk.Label(filters,text="DD-MM-YYYY",bg=LIGHT,fg="#5f6b76").pack(side="left",padx=(0,10))
         tk.Label(filters,text="Account From:",bg=LIGHT,font=("Segoe UI",9,"bold")).pack(side="left")
         self.account_search_box(filters,self.trial_account_from,16).pack(side="left",padx=3)
@@ -1857,7 +1881,7 @@ class SaberApp(tk.Tk):
                 values.append(None)
                 continue
             try:
-                values.append(datetime.strptime(value, "%d-%m-%Y").strftime("%Y-%m-%d"))
+                values.append(parse_user_date(value).strftime("%Y-%m-%d"))
             except ValueError:
                 if show_error:
                     messagebox.showwarning("Trial Balance", f"{label} must use DD-MM-YYYY")

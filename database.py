@@ -378,7 +378,7 @@ class Database:
 
     def _date_year(self, value):
         text = str(value or "").strip()
-        for pattern in ("%d-%m-%Y", "%Y-%m-%d"):
+        for pattern in ("%d-%m-%Y", "%d%m%Y", "%Y-%m-%d", "%Y%m%d"):
             try: return datetime.strptime(text, pattern).year
             except ValueError: pass
         raise ValueError("Date must use DD-MM-YYYY")
@@ -977,10 +977,10 @@ class Database:
         year=int(year)
         with self.connect() as db:
             row=db.execute("SELECT status FROM fiscal_years WHERE year=?",(year,)).fetchone()
-            if not row or row["status"]!="closed": raise ValueError(f"Fiscal year {year} is not closed")
             closing_ids=[item["id"] for item in db.execute("SELECT id FROM journal_entries WHERE source_type='year_close' AND entry_number LIKE ?",(f"CLOSE-{year}-%",))]
             for entry_id in closing_ids: db.execute("DELETE FROM journal_entries WHERE id=?",(entry_id,))
-            db.execute("UPDATE fiscal_years SET status='open',closed_at=NULL,closed_by=NULL,details=NULL WHERE year=?",(year,))
+            db.execute("""INSERT INTO fiscal_years(year,status,opened_at) VALUES(?,'open',?)
+                ON CONFLICT(year) DO UPDATE SET status='open',closed_at=NULL,closed_by=NULL,details=NULL""",(year,f"{year}-01-01T00:00:00"))
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"reopen","fiscal_year",year,json.dumps({"removed_closing_entries":len(closing_ids)}),utcnow()))
         return {"year":year,"status":"open","removed_closing_entries":len(closing_ids)}
