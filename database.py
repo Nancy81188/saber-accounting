@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
 CREATE TABLE IF NOT EXISTS employees (
  id INTEGER PRIMARY KEY, employee_number TEXT NOT NULL UNIQUE, full_name TEXT NOT NULL,
  national_id TEXT, mof_number TEXT, nssf_number TEXT, address TEXT, contact_number TEXT,
- marital_status TEXT NOT NULL DEFAULT 'single', children INTEGER NOT NULL DEFAULT 0,
+ marital_status TEXT NOT NULL DEFAULT 'single', spouse_works INTEGER NOT NULL DEFAULT 0, children INTEGER NOT NULL DEFAULT 0,
  hire_date TEXT, leave_date TEXT, job_title TEXT, branch_id INTEGER REFERENCES branches(id),
  currency TEXT NOT NULL DEFAULT 'LBP', base_salary TEXT NOT NULL DEFAULT '0',
  salary_account TEXT, payable_account TEXT, active INTEGER NOT NULL DEFAULT 1,
@@ -127,9 +127,9 @@ CREATE TABLE IF NOT EXISTS payroll_settings (
 CREATE TABLE IF NOT EXISTS payroll_records (
  id INTEGER PRIMARY KEY, payroll_number TEXT NOT NULL UNIQUE, employee_id INTEGER NOT NULL REFERENCES employees(id),
  period_date TEXT NOT NULL, currency TEXT NOT NULL, salary TEXT NOT NULL DEFAULT '0',
- transport TEXT NOT NULL DEFAULT '0', overtime TEXT NOT NULL DEFAULT '0', commission TEXT NOT NULL DEFAULT '0',
+ transport TEXT NOT NULL DEFAULT '0', overtime TEXT NOT NULL DEFAULT '0', commission TEXT NOT NULL DEFAULT '0', retro_salary TEXT NOT NULL DEFAULT '0', retro_from TEXT, retro_to TEXT,
  schooling TEXT NOT NULL DEFAULT '0', bonus TEXT NOT NULL DEFAULT '0', thirteenth_month TEXT NOT NULL DEFAULT '0',
- gross_salary TEXT NOT NULL DEFAULT '0', taxable_salary TEXT NOT NULL DEFAULT '0', income_tax TEXT NOT NULL DEFAULT '0',
+ gross_salary TEXT NOT NULL DEFAULT '0', taxable_salary TEXT NOT NULL DEFAULT '0', income_tax TEXT NOT NULL DEFAULT '0', income_tax_lbp TEXT NOT NULL DEFAULT '0',
  nssf_base TEXT NOT NULL DEFAULT '0', employee_nssf TEXT NOT NULL DEFAULT '0', employer_medical TEXT NOT NULL DEFAULT '0',
  employer_end_service TEXT NOT NULL DEFAULT '0', employer_family TEXT NOT NULL DEFAULT '0', net_salary TEXT NOT NULL DEFAULT '0',
  reference TEXT, notes TEXT, status TEXT NOT NULL DEFAULT 'draft', journal_entry_id INTEGER REFERENCES journal_entries(id),
@@ -241,6 +241,13 @@ class Database:
                 if column not in party_columns: db.execute(f"ALTER TABLE parties ADD COLUMN {column} TEXT")
             if "account_category" not in party_columns: db.execute("ALTER TABLE parties ADD COLUMN account_category TEXT")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_parties_account_number ON parties(account_number) WHERE account_number IS NOT NULL")
+            employee_columns={row["name"] for row in db.execute("PRAGMA table_info(employees)")}
+            if "spouse_works" not in employee_columns: db.execute("ALTER TABLE employees ADD COLUMN spouse_works INTEGER NOT NULL DEFAULT 0")
+            payroll_columns={row["name"] for row in db.execute("PRAGMA table_info(payroll_records)")}
+            if "income_tax_lbp" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN income_tax_lbp TEXT NOT NULL DEFAULT '0'")
+            if "retro_salary" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_salary TEXT NOT NULL DEFAULT '0'")
+            if "retro_from" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_from TEXT")
+            if "retro_to" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_to TEXT")
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('base_currency','USD')")
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('backup_interval_hours','24')")
@@ -1581,23 +1588,23 @@ class Database:
         elif len(number)!=9: raise ValueError("Employee number must contain 9 digits (or enter a 4-digit prefix)")
         currency=str(item.get("currency") or "LBP").upper()
         if currency not in ("USD","LBP","EUR","AED"): raise ValueError("Invalid employee currency")
-        children=max(0,int(item.get("children") or 0)); active=1 if item.get("active",True) else 0
+        children=max(0,int(item.get("children") or 0)); spouse_works=1 if item.get("spouse_works",False) else 0; active=1 if item.get("active",True) else 0
         employee_id=item.get("id")
         values=(number,name,str(item.get("national_id") or "").strip(),str(item.get("mof_number") or "").strip(),
             str(item.get("nssf_number") or "").strip(),str(item.get("address") or "").strip(),str(item.get("contact_number") or "").strip(),
-            str(item.get("marital_status") or "single").lower(),children,item.get("hire_date") or None,item.get("leave_date") or None,
+            str(item.get("marital_status") or "single").lower(),spouse_works,children,item.get("hire_date") or None,item.get("leave_date") or None,
             str(item.get("job_title") or "").strip(),int(item["branch_id"]) if item.get("branch_id") else None,currency,
             str(Decimal(str(item.get("base_salary") or 0))),item.get("salary_account") or "621100001",
             item.get("payable_account") or "421100001",active)
         with self.connect() as db:
             if employee_id:
                 db.execute("""UPDATE employees SET employee_number=?,full_name=?,national_id=?,mof_number=?,nssf_number=?,address=?,contact_number=?,
-                    marital_status=?,children=?,hire_date=?,leave_date=?,job_title=?,branch_id=?,currency=?,base_salary=?,salary_account=?,payable_account=?,active=? WHERE id=?""",
+                    marital_status=?,spouse_works=?,children=?,hire_date=?,leave_date=?,job_title=?,branch_id=?,currency=?,base_salary=?,salary_account=?,payable_account=?,active=? WHERE id=?""",
                     values+(int(employee_id),)); saved_id=int(employee_id); action="update"
             else:
                 saved_id=db.execute("""INSERT INTO employees(employee_number,full_name,national_id,mof_number,nssf_number,address,contact_number,
-                    marital_status,children,hire_date,leave_date,job_title,branch_id,currency,base_salary,salary_account,payable_account,active,created_by,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",values+(user_id,utcnow())).lastrowid; action="create"
+                    marital_status,spouse_works,children,hire_date,leave_date,job_title,branch_id,currency,base_salary,salary_account,payable_account,active,created_by,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",values+(user_id,utcnow())).lastrowid; action="create"
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,action,"employee",saved_id,json.dumps({"employee_number":number,"name":name}),utcnow()))
         return next(row for row in self.list_employees() if row["id"]==saved_id)
@@ -1653,24 +1660,30 @@ class Database:
         if not employee: raise ValueError("Employee was not found")
         settings=self.payroll_settings_for(period)
         money={name:Decimal(str(item.get(name) if item.get(name) not in (None,"") else (employee["base_salary"] if name=="salary" else 0)))
-            for name in ("salary","transport","overtime","commission","schooling","bonus","thirteenth_month")}
-        gross=sum(money.values(),Decimal("0")); annual=gross*12
+            for name in ("salary","transport","overtime","commission","retro_salary","schooling","bonus","thirteenth_month")}
+        gross=sum(money.values(),Decimal("0")); currency=employee["currency"]
+        gross_lbp=self._converted_amount(gross,currency,"LBP",period); annual_lbp=gross_lbp*12
         allowance=Decimal(settings.get("single_allowance","0"))
-        if employee["marital_status"] in ("married","spouse"): allowance+=Decimal(settings.get("spouse_allowance","0"))
+        if employee["marital_status"] in ("married","spouse") and not int(employee["spouse_works"] or 0): allowance+=Decimal(settings.get("spouse_allowance","0"))
         allowance+=Decimal(settings.get("child_allowance","0"))*int(employee["children"] or 0)
-        taxable=max(Decimal("0"),annual-allowance)
-        income_tax=(self._progressive_tax(taxable,settings.get("tax_brackets",[]))/12).quantize(Decimal("0.01"))
-        salary_base=money["salary"]+money["overtime"]+money["commission"]+money["bonus"]+money["thirteenth_month"]
-        def capped(ceiling):
-            limit=Decimal(str(settings.get(ceiling,"0") or 0)); return min(salary_base,limit) if limit>0 else salary_base
-        employee_nssf=(capped("employee_ceiling")*Decimal(settings.get("employee_nssf_rate","0"))).quantize(Decimal("0.01"))
-        medical=(capped("medical_ceiling")*Decimal(settings.get("medical_rate","0"))).quantize(Decimal("0.01"))
-        family=(capped("family_ceiling")*Decimal(settings.get("family_rate","0"))).quantize(Decimal("0.01"))
-        end_service=(capped("end_service_ceiling")*Decimal(settings.get("end_service_rate","0"))).quantize(Decimal("0.01"))
+        taxable_lbp=max(Decimal("0"),annual_lbp-allowance)
+        income_tax_lbp=(self._progressive_tax(taxable_lbp,settings.get("tax_brackets",[]))/12).quantize(Decimal("0.01"))
+        income_tax=self._converted_amount(income_tax_lbp,"LBP",currency,period).quantize(Decimal("0.01"))
+        taxable_monthly=self._converted_amount(taxable_lbp/12,"LBP",currency,period).quantize(Decimal("0.01"))
+        salary_base=money["salary"]+money["overtime"]+money["commission"]+money["retro_salary"]+money["bonus"]+money["thirteenth_month"]
+        salary_base_lbp=self._converted_amount(salary_base,currency,"LBP",period)
+        def contribution(ceiling,rate):
+            limit=Decimal(str(settings.get(ceiling,"0") or 0)); base=min(salary_base_lbp,limit) if limit>0 else salary_base_lbp
+            amount_lbp=(base*Decimal(settings.get(rate,"0"))).quantize(Decimal("0.01"))
+            return self._converted_amount(amount_lbp,"LBP",currency,period).quantize(Decimal("0.01")),amount_lbp
+        employee_nssf,employee_nssf_lbp=contribution("employee_ceiling","employee_nssf_rate")
+        medical,medical_lbp=contribution("medical_ceiling","medical_rate")
+        family,family_lbp=contribution("family_ceiling","family_rate")
+        end_service,end_service_lbp=contribution("end_service_ceiling","end_service_rate")
         net=(gross-income_tax-employee_nssf).quantize(Decimal("0.01"))
-        return {**{k:float(v) for k,v in money.items()},"gross_salary":float(gross),"taxable_salary":float(taxable/12),"income_tax":float(income_tax),
-            "nssf_base":float(salary_base),"employee_nssf":float(employee_nssf),"employer_medical":float(medical),
-            "employer_end_service":float(end_service),"employer_family":float(family),"net_salary":float(net),"currency":employee["currency"]}
+        return {**{k:float(v) for k,v in money.items()},"gross_salary":float(gross),"taxable_salary":float(taxable_monthly),"income_tax":float(income_tax),"income_tax_lbp":float(income_tax_lbp),
+            "nssf_base":float(salary_base),"employee_nssf":float(employee_nssf),"employee_nssf_lbp":float(employee_nssf_lbp),"employer_medical":float(medical),
+            "employer_end_service":float(end_service),"employer_family":float(family),"net_salary":float(net),"currency":currency}
 
     def list_payroll(self,period_from=None,period_to=None):
         conditions=[]; values=[]
@@ -1688,18 +1701,18 @@ class Database:
             if not number:
                 prefix=f"PAY-{period[:7].replace('-','')}-"; row=db.execute("SELECT payroll_number FROM payroll_records WHERE payroll_number LIKE ? ORDER BY payroll_number DESC LIMIT 1",(prefix+"%",)).fetchone()
                 number=f"{prefix}{(int(row['payroll_number'].rsplit('-',1)[-1])+1 if row else 1):06d}"
-            fields=("salary","transport","overtime","commission","schooling","bonus","thirteenth_month","gross_salary","taxable_salary","income_tax",
+            fields=("salary","transport","overtime","commission","retro_salary","schooling","bonus","thirteenth_month","gross_salary","taxable_salary","income_tax","income_tax_lbp",
                 "nssf_base","employee_nssf","employer_medical","employer_end_service","employer_family","net_salary")
             values=[str(calc[field]) for field in fields]
             existing=db.execute("SELECT id,status FROM payroll_records WHERE employee_id=? AND period_date=?",(employee_id,period)).fetchone()
             if existing and existing["status"]=="posted": raise ValueError("Posted payroll cannot be changed")
             if existing:
-                db.execute(f"UPDATE payroll_records SET payroll_number=?,currency=?,{','.join(field+'=?' for field in fields)},reference=?,notes=? WHERE id=?",
-                    (number,calc["currency"],*values,item.get("reference"),item.get("notes"),existing["id"])); saved_id=existing["id"]
+                db.execute(f"UPDATE payroll_records SET payroll_number=?,currency=?,{','.join(field+'=?' for field in fields)},retro_from=?,retro_to=?,reference=?,notes=? WHERE id=?",
+                    (number,calc["currency"],*values,item.get("retro_from") or None,item.get("retro_to") or None,item.get("reference"),item.get("notes"),existing["id"])); saved_id=existing["id"]
             else:
                 columns=",".join(fields); marks=",".join("?" for _ in fields)
-                saved_id=db.execute(f"INSERT INTO payroll_records(payroll_number,employee_id,period_date,currency,{columns},reference,notes,created_by,created_at) VALUES(?,?,?,?,{marks},?,?,?,?)",
-                    (number,employee_id,period,calc["currency"],*values,item.get("reference"),item.get("notes"),user_id,utcnow())).lastrowid
+                saved_id=db.execute(f"INSERT INTO payroll_records(payroll_number,employee_id,period_date,currency,{columns},retro_from,retro_to,reference,notes,created_by,created_at) VALUES(?,?,?,?,{marks},?,?,?,?,?,?)",
+                    (number,employee_id,period,calc["currency"],*values,item.get("retro_from") or None,item.get("retro_to") or None,item.get("reference"),item.get("notes"),user_id,utcnow())).lastrowid
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"save","payroll",saved_id,json.dumps({"payroll_number":number}),utcnow()))
         return next(row for row in self.list_payroll() if row["id"]==saved_id)

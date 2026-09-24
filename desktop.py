@@ -1215,19 +1215,22 @@ class SaberApp(tk.Tk):
 
         form=tk.LabelFrame(run,text="Monthly Payroll",bg=LIGHT); form.pack(fill="x",padx=10,pady=8)
         self.payroll_employee=tk.StringVar(); self.payroll_period=tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-        self.payroll_vars={name:tk.StringVar(value="0") for name in ("salary","transport","overtime","commission","schooling","bonus","thirteenth_month")}
+        self.payroll_vars={name:tk.StringVar(value="0") for name in ("salary","transport","overtime","commission","retro_salary","schooling","bonus","thirteenth_month")}
+        self.payroll_retro_from=tk.StringVar(); self.payroll_retro_to=tk.StringVar()
         tk.Label(form,text="Employee",bg=LIGHT).grid(row=0,column=0,padx=6,pady=5,sticky="w")
         self.payroll_employee_combo=ttk.Combobox(form,textvariable=self.payroll_employee,state="readonly",width=34); self.payroll_employee_combo.grid(row=0,column=1,padx=6,pady=5,sticky="w")
-        tk.Label(form,text="Period Date",bg=LIGHT).grid(row=0,column=2,padx=6,pady=5,sticky="w"); tk.Entry(form,textvariable=self.payroll_period,width=14).grid(row=0,column=3,padx=6,pady=5,sticky="w")
-        labels=(("salary","Salary"),("transport","Transport"),("overtime","Overtime"),("commission","Commission"),("schooling","Schooling"),("bonus","Bonus"),("thirteenth_month","13th Month"))
+        tk.Label(form,text="Period Date",bg=LIGHT).grid(row=0,column=2,padx=6,pady=5,sticky="w"); self.date_entry(form,self.payroll_period,14).grid(row=0,column=3,padx=6,pady=5,sticky="w")
+        labels=(("salary","Salary"),("transport","Transport"),("overtime","Overtime"),("commission","Commission"),("retro_salary","Retroactive Salary"),("schooling","Schooling"),("bonus","Bonus"),("thirteenth_month","13th Month"))
         for index,(key,label) in enumerate(labels):
             row=1+index//4; column=(index%4)*2
             tk.Label(form,text=label,bg=LIGHT).grid(row=row,column=column,padx=6,pady=5,sticky="w")
             tk.Entry(form,textvariable=self.payroll_vars[key],width=16).grid(row=row,column=column+1,padx=6,pady=5,sticky="w")
+        tk.Label(form,text="Retro From",bg=LIGHT).grid(row=3,column=0,padx=6,pady=5,sticky="w"); self.date_entry(form,self.payroll_retro_from,14).grid(row=3,column=1,padx=6,pady=5)
+        tk.Label(form,text="Retro To",bg=LIGHT).grid(row=3,column=2,padx=6,pady=5,sticky="w"); self.date_entry(form,self.payroll_retro_to,14).grid(row=3,column=3,padx=6,pady=5)
         self.payroll_result=tk.StringVar(value="Gross: 0 | Tax: 0 | Employee NSSF: 0 | Net: 0")
-        tk.Label(form,textvariable=self.payroll_result,bg=LIGHT,fg=NAVY,font=("Segoe UI",10,"bold")).grid(row=3,column=0,columnspan=6,padx=6,pady=9,sticky="w")
-        self.action_button(form,"Calculate",self.calculate_payroll).grid(row=3,column=6,padx=5,pady=7)
-        self.action_button(form,"Save Payroll",self.save_payroll).grid(row=3,column=7,padx=5,pady=7)
+        tk.Label(form,textvariable=self.payroll_result,bg=LIGHT,fg=NAVY,font=("Segoe UI",10,"bold")).grid(row=4,column=0,columnspan=6,padx=6,pady=9,sticky="w")
+        self.action_button(form,"Calculate",self.calculate_payroll).grid(row=4,column=6,padx=5,pady=7)
+        self.action_button(form,"Save Payroll",self.save_payroll).grid(row=4,column=7,padx=5,pady=7)
         payroll_actions=tk.Frame(run,bg=LIGHT); payroll_actions.pack(fill="x",padx=10)
         self.action_button(payroll_actions,"Post Selected to Accounting",self.post_selected_payroll).pack(side="left",padx=4,pady=3)
         self.payroll_tree=self.table(run,[("number","Payroll No.",135),("period","Period",95),("employee","Employee",190),("currency","Currency",65),
@@ -1249,7 +1252,7 @@ class SaberApp(tk.Tk):
         window=tk.Toplevel(self); window.title("Employee File"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
         data=employee or {}; fields={key:tk.StringVar(value=str(data.get(key,""))) for key in ("employee_number","full_name","national_id","mof_number","nssf_number","address","contact_number","job_title","hire_date","leave_date","base_salary","salary_account","payable_account")}
         if not fields["employee_number"].get(): fields["employee_number"].set("1000")
-        marital=tk.StringVar(value=data.get("marital_status","single")); children=tk.StringVar(value=str(data.get("children",0))); currency=tk.StringVar(value=data.get("currency","LBP")); active=tk.BooleanVar(value=bool(data.get("active",1)))
+        marital=tk.StringVar(value=data.get("marital_status","single")); spouse_works=tk.BooleanVar(value=bool(data.get("spouse_works",0))); children=tk.StringVar(value=str(data.get("children",0))); currency=tk.StringVar(value=data.get("currency","LBP")); active=tk.BooleanVar(value=bool(data.get("active",1)))
         rows=(("employee_number","Employee ID / 4-digit prefix"),("full_name","Full Name"),("national_id","National ID"),("mof_number","MOF Number"),("nssf_number","NSSF Number"),("address","Address"),("contact_number","Contact Number"),("job_title","Job Title"),("hire_date","Hire Date"),("leave_date","Leave Date"),("base_salary","Base Salary"),("salary_account","Salary Expense Account"),("payable_account","Salary Payable Account"))
         for index,(key,label) in enumerate(rows):
             column=0 if index<7 else 2; row=index if index<7 else index-7
@@ -1257,9 +1260,10 @@ class SaberApp(tk.Tk):
         tk.Label(window,text="Marital Status",bg=LIGHT).grid(row=7,column=0,padx=10,pady=5,sticky="w"); ttk.Combobox(window,textvariable=marital,values=["single","married"],state="readonly",width=25).grid(row=7,column=1)
         tk.Label(window,text="Children",bg=LIGHT).grid(row=8,column=0,padx=10,pady=5,sticky="w"); tk.Entry(window,textvariable=children,width=28).grid(row=8,column=1)
         tk.Label(window,text="Currency",bg=LIGHT).grid(row=7,column=2,padx=10,pady=5,sticky="w"); ttk.Combobox(window,textvariable=currency,values=["LBP","USD","EUR","AED"],state="readonly",width=25).grid(row=7,column=3)
-        tk.Checkbutton(window,text="Active",variable=active,bg=LIGHT).grid(row=8,column=2,columnspan=2)
+        tk.Checkbutton(window,text="Spouse Works",variable=spouse_works,bg=LIGHT).grid(row=8,column=2,sticky="w")
+        tk.Checkbutton(window,text="Active",variable=active,bg=LIGHT).grid(row=8,column=3,sticky="w")
         def save():
-            payload={key:var.get().strip() for key,var in fields.items()}; payload.update({"id":data.get("id"),"marital_status":marital.get(),"children":children.get(),"currency":currency.get(),"active":active.get()})
+            payload={key:var.get().strip() for key,var in fields.items()}; payload.update({"id":data.get("id"),"marital_status":marital.get(),"spouse_works":spouse_works.get(),"children":children.get(),"currency":currency.get(),"active":active.get()})
             try: saved=self.client.save_employee(payload)
             except Exception as exc: return messagebox.showerror("Employee",str(exc),parent=window)
             window.destroy(); self.load_payroll(); messagebox.showinfo("Employee",f'Employee {saved["employee_number"]} saved successfully')
@@ -1286,13 +1290,17 @@ class SaberApp(tk.Tk):
     def payroll_payload(self):
         employee=self.payroll_employee_map.get(self.payroll_employee.get())
         if not employee: raise ValueError("Select an employee")
-        payload={"employee_id":employee["id"],"period_date":self.payroll_period.get().strip()}
-        payload.update({key:var.get().strip() or "0" for key,var in self.payroll_vars.items()}); return payload
+        payload={"employee_id":employee["id"],"period_date":formatted_user_date(self.payroll_period.get())}
+        payload.update({key:var.get().strip() or "0" for key,var in self.payroll_vars.items()})
+        if float(payload.get("retro_salary") or 0):
+            if not self.payroll_retro_from.get().strip() or not self.payroll_retro_to.get().strip(): raise ValueError("Enter Retro From and Retro To dates")
+            payload["retro_from"]=formatted_user_date(self.payroll_retro_from.get()); payload["retro_to"]=formatted_user_date(self.payroll_retro_to.get())
+        return payload
 
     def calculate_payroll(self):
         try: result=self.client.calculate_payroll(self.payroll_payload())
         except Exception as exc: return messagebox.showerror("Payroll",str(exc))
-        self.payroll_result.set(f'Gross: {result["gross_salary"]:,.2f} | Tax: {result["income_tax"]:,.2f} | Employee NSSF: {result["employee_nssf"]:,.2f} | Net: {result["net_salary"]:,.2f} {result["currency"]}')
+        self.payroll_result.set(f'Gross: {result["gross_salary"]:,.2f} | Tax: {result["income_tax"]:,.2f} {result["currency"]} ({result["income_tax_lbp"]:,.0f} LBP) | Employee NSSF: {result["employee_nssf"]:,.2f} | Net: {result["net_salary"]:,.2f}')
 
     def save_payroll(self):
         try: saved=self.client.save_payroll(self.payroll_payload())
