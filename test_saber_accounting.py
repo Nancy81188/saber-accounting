@@ -239,6 +239,20 @@ class SaberAccountingTest(unittest.TestCase):
             db.delete_journal_voucher(voucher["entry_id"],user["id"])
             self.assertFalse(any(row["id"]==invoice_id for row in db.list_invoices()))
 
+    def test_sales_invoice_draft_and_custom_nine_digit_posting_accounts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"sales_invoice.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            invoice={"invoice_number":"","invoice_date":"24-09-2026","party_name":"Sales Client","kind":"sales","currency":"USD",
+                     "supplier_account":"","vat_account":"442700000","expense_account":"713100000","status":"review","source_file":"Sales Invoice"}
+            invoice_id=db.create_manual_invoice(invoice,[{"description":"Professional service","quantity":2,"unit_price":100,"vat_rate":11}],user["id"])
+            row=next(item for item in db.list_invoices() if item["id"]==invoice_id)
+            self.assertEqual(row["status"],"review")
+            self.assertTrue(str(row["invoice_number"]).startswith("SAL-2026-"))
+            self.assertEqual(len(str(row["supplier_account"])),9)
+            codes={item["code"] for item in db.trial_balance(posting_status="review")}
+            self.assertTrue({str(row["supplier_account"]),"442700000","713100000"}.issubset(codes))
+
     def test_direct_journal_voucher_new_edit_multiple_lines_and_number(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"voucher.db"); db.initialize("secret")
