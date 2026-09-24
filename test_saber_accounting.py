@@ -8,8 +8,12 @@ from lebanese_accounts import LEBANESE_ACCOUNTS
 from report_export import export_excel, export_invoice_pdf, export_pdf
 from desktop import natural_sort_value, row_matches_search, sortable_date
 from company_manager import CompanyManager
+from run_desktop import local_server_ready
 
 class SaberAccountingTest(unittest.TestCase):
+    def test_local_server_probe_is_safe_when_service_is_not_running(self):
+        self.assertIn(local_server_ready(),(True,False))
+
     def test_sort_helpers_support_dates_numbers_and_names(self):
         dates=["31-12-2025","01-01-2026","15-06-2024"]
         self.assertEqual(sorted(dates,key=sortable_date),["15-06-2024","31-12-2025","01-01-2026"])
@@ -538,5 +542,28 @@ class SaberAccountingTest(unittest.TestCase):
             self.assertEqual(next(r for r in lines if r["account_code"]=="601100000")["credit"],10)
             trial=db.trial_balance("2026-09-20","2026-09-20")
             self.assertTrue(all("usd_balance" in r and "lbp_balance" in r for r in trial))
+
+    def test_payroll_employee_number_calculation_and_editable_rules(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"payroll.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            employee=db.save_employee({"employee_number":"1234","full_name":"Payroll Employee","currency":"LBP",
+                "base_salary":"100000000","marital_status":"married","children":1},user["id"])
+            self.assertEqual(employee["employee_number"],"123400001")
+            second=db.save_employee({"employee_number":"1234","full_name":"Second Employee","currency":"LBP","base_salary":"1"},user["id"])
+            self.assertEqual(second["employee_number"],"123400002")
+            settings=db.payroll_settings_for("2025-06-30")
+            settings.update({"date_from":"2025-01-01","employee_ceiling":"50000000","medical_ceiling":"60000000",
+                "family_ceiling":"70000000","end_service_ceiling":"0"})
+            db.save_payroll_settings(settings,user["id"])
+            result=db.calculate_payroll({"employee_id":employee["id"],"period_date":"2025-06-30","overtime":"5000000",
+                "transport":"10000000","commission":"2000000","schooling":"3000000","bonus":"4000000","thirteenth_month":"0"})
+            self.assertEqual(result["gross_salary"],124000000)
+            self.assertEqual(result["employee_nssf"],1500000)
+            self.assertGreater(result["income_tax"],0)
+            saved=db.save_payroll({"employee_id":employee["id"],"period_date":"2025-06-30","overtime":"5000000",
+                "transport":"10000000","commission":"2000000","schooling":"3000000","bonus":"4000000"},user["id"])
+            self.assertTrue(saved["payroll_number"].startswith("PAY-202506-"))
+            self.assertEqual(saved["status"],"draft")
 
 if __name__ == "__main__": unittest.main()

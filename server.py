@@ -82,6 +82,17 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/branches": return self._json(200,{"items":self.db.list_branches()})
         if path == "/api/payments": return self._json(200,{"items":self.db.list_payments()})
         if path == "/api/expenses": return self._json(200,{"items":self.db.list_expenses()})
+        if path == "/api/employees": return self._json(200,{"items":self.db.list_employees()})
+        if path == "/api/payroll":
+            query=parse_qs(parsed.query)
+            return self._json(200,{"items":self.db.list_payroll(query.get("from_date",[None])[0],query.get("to_date",[None])[0])})
+        if path == "/api/payroll/settings":
+            query=parse_qs(parsed.query)
+            return self._json(200,self.db.payroll_settings_for(query.get("date",[None])[0]))
+        if path == "/api/employees/next-number":
+            query=parse_qs(parsed.query)
+            try: return self._json(200,{"employee_number":self.db.next_employee_number(query.get("prefix",["1000"])[0])})
+            except Exception as exc: return self._json(400,{"error":str(exc)})
         if path == "/api/statement":
             query = parse_qs(parsed.query)
             try:
@@ -217,6 +228,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             try: expense_id=self.db.add_expense(body,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"expense_id":expense_id})
+        if path == "/api/employees":
+            try: result=self.db.save_employee(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"employee":result})
+        if path == "/api/payroll/calculate":
+            try: result=self.db.calculate_payroll(body)
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
+        if path == "/api/payroll":
+            try: result=self.db.save_payroll(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"payroll":result})
+        if path == "/api/payroll/settings":
+            if user["role"]!="admin": return self._json(403,{"error":"Administrator permission required"})
+            try: result=self.db.save_payroll_settings(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,result)
         if path == "/api/journal-vouchers":
             try: result=self.db.save_journal_voucher(body.get("voucher",{}),body.get("lines",[]),user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})

@@ -191,9 +191,9 @@ class SaberApp(tk.Tk):
         tab_nav=tk.Frame(self,bg=LIGHT); tab_nav.pack(fill="x",padx=18,pady=(8,0))
         ttk.Style(self).layout("Tabless.TNotebook.Tab",[])
         notebook=ttk.Notebook(self,style="Tabless.TNotebook"); self.main_notebook=notebook; notebook.pack(fill="both",expand=True,padx=18,pady=(6,16))
-        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.parties_tab=tk.Frame(notebook,bg=LIGHT); self.transactions_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.reports_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT); self.settings_tab=tk.Frame(notebook,bg=LIGHT)
-        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text=tr(lang,"manual_entry")); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.parties_tab,text=tr(lang,"customers_suppliers")); notebook.add(self.transactions_tab,text=tr(lang,"payments_expenses")); notebook.add(self.journal_tab,text=tr(lang,"general_journal")); notebook.add(self.trial_tab,text=tr(lang,"trial_balance")); notebook.add(self.pnl_tab,text=tr(lang,"profit_loss")); notebook.add(self.reports_tab,text=tr(lang,"financial_reports")); notebook.add(self.statement_tab,text=tr(lang,"statement_account")); notebook.add(self.accounts_tab,text=tr(lang,"chart_accounts")); notebook.add(self.settings_tab,text=tr(lang,"security_backup_rates"))
-        self.main_tab_pages=[self.dashboard_tab,self.invoices_tab,self.manual_tab,self.import_tab,self.parties_tab,self.transactions_tab,self.journal_tab,self.trial_tab,self.pnl_tab,self.reports_tab,self.statement_tab,self.accounts_tab,self.settings_tab]
+        self.dashboard_tab=tk.Frame(notebook,bg=LIGHT); self.invoices_tab=tk.Frame(notebook,bg=LIGHT); self.manual_tab=tk.Frame(notebook,bg=LIGHT); self.import_tab=tk.Frame(notebook,bg=LIGHT); self.parties_tab=tk.Frame(notebook,bg=LIGHT); self.transactions_tab=tk.Frame(notebook,bg=LIGHT); self.payroll_tab=tk.Frame(notebook,bg=LIGHT); self.journal_tab=tk.Frame(notebook,bg=LIGHT); self.trial_tab=tk.Frame(notebook,bg=LIGHT); self.pnl_tab=tk.Frame(notebook,bg=LIGHT); self.reports_tab=tk.Frame(notebook,bg=LIGHT); self.accounts_tab=tk.Frame(notebook,bg=LIGHT); self.statement_tab=tk.Frame(notebook,bg=LIGHT); self.settings_tab=tk.Frame(notebook,bg=LIGHT)
+        notebook.add(self.dashboard_tab,text=tr(lang,"dashboard")); notebook.add(self.invoices_tab,text=tr(lang,"invoices")); notebook.add(self.manual_tab,text=tr(lang,"manual_entry")); notebook.add(self.import_tab,text=tr(lang,"import")); notebook.add(self.parties_tab,text=tr(lang,"customers_suppliers")); notebook.add(self.transactions_tab,text=tr(lang,"payments_expenses")); notebook.add(self.payroll_tab,text="Payroll"); notebook.add(self.journal_tab,text=tr(lang,"general_journal")); notebook.add(self.trial_tab,text=tr(lang,"trial_balance")); notebook.add(self.pnl_tab,text=tr(lang,"profit_loss")); notebook.add(self.reports_tab,text=tr(lang,"financial_reports")); notebook.add(self.statement_tab,text=tr(lang,"statement_account")); notebook.add(self.accounts_tab,text=tr(lang,"chart_accounts")); notebook.add(self.settings_tab,text=tr(lang,"security_backup_rates"))
+        self.main_tab_pages=[self.dashboard_tab,self.invoices_tab,self.manual_tab,self.import_tab,self.parties_tab,self.transactions_tab,self.payroll_tab,self.journal_tab,self.trial_tab,self.pnl_tab,self.reports_tab,self.statement_tab,self.accounts_tab,self.settings_tab]
         self.tab_names=[notebook.tab(tab,"text") for tab in notebook.tabs()]
         self.tab_choice=tk.StringVar(value=self.tab_names[0])
         self.tab_buttons=[]
@@ -209,7 +209,7 @@ class SaberApp(tk.Tk):
         tk.Label(filter_bar,text="Show currency:",bg=LIGHT,font=("Segoe UI",10,"bold")).pack(side="left")
         currency_filter=ttk.Combobox(filter_bar,textvariable=self.view_currency,values=["All Currencies","USD","EUR","LBP","AED"],state="readonly",width=16)
         currency_filter.pack(side="left",padx=8); currency_filter.bind("<<ComboboxSelected>>",lambda _event:self.currency_changed())
-        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_parties(); self.build_transactions(); self.build_journal(); self.build_trial(); self.build_profit_loss(); self.build_financial_reports(); self.build_statement(); self.build_accounts(); self.build_settings()
+        self.build_dashboard(); self.build_invoices(); self.build_manual(); self.build_import(); self.build_parties(); self.build_transactions(); self.build_payroll(); self.build_journal(); self.build_trial(); self.build_profit_loss(); self.build_financial_reports(); self.build_statement(); self.build_accounts(); self.build_settings()
 
     def record_activity(self,_event=None): self.last_activity=time.monotonic()
 
@@ -1174,6 +1174,91 @@ class SaberApp(tk.Tk):
         self.payments_tree.delete(*self.payments_tree.get_children()); self.expenses_tree.delete(*self.expenses_tree.get_children())
         for row in payments: self.payments_tree.insert("","end",values=(row["payment_date"],row["kind"],row["party_name"],row["currency"],f'{row["amount"]:,.2f}',row["cash_account"],row["reference"],row["description"]))
         for row in expenses: self.expenses_tree.insert("","end",values=(row["expense_date"],row["description"],row["category"],row["currency"],f'{row.get("with_vat_subtotal",row["subtotal"]):,.2f}',f'{row.get("without_vat_subtotal",0):,.2f}',f'{row["vat"]:,.2f}',f'{row["total"]:,.2f}',row["expense_account"],row.get("expense_without_vat_account","601100001"),row["payment_account"]))
+
+    def build_payroll(self):
+        nested=ttk.Notebook(self.payroll_tab); nested.pack(fill="both",expand=True,padx=8,pady=8)
+        employees=tk.Frame(nested,bg=LIGHT); run=tk.Frame(nested,bg=LIGHT)
+        nested.add(employees,text="Employees"); nested.add(run,text="Payroll Entry")
+        employee_actions=tk.Frame(employees,bg=LIGHT); employee_actions.pack(fill="x",padx=10,pady=8)
+        self.action_button(employee_actions,"New Employee",lambda:self.employee_dialog()).pack(side="left",padx=4)
+        self.action_button(employee_actions,"Edit Selected",self.edit_selected_employee).pack(side="left",padx=4)
+        self.action_button(employee_actions,"Refresh",self.load_payroll).pack(side="left",padx=4)
+        self.employee_tree=self.table(employees,[("number","Employee ID",105),("name","Employee Name",220),("job","Job Title",150),
+            ("branch","Branch",120),("currency","Currency",70),("salary","Base Salary",120),("nssf","NSSF Number",120),("active","Active",65)])
+        self.employee_tree.bind("<Double-1>",lambda _event:self.edit_selected_employee())
+
+        form=tk.LabelFrame(run,text="Monthly Payroll",bg=LIGHT); form.pack(fill="x",padx=10,pady=8)
+        self.payroll_employee=tk.StringVar(); self.payroll_period=tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        self.payroll_vars={name:tk.StringVar(value="0") for name in ("salary","transport","overtime","commission","schooling","bonus","thirteenth_month")}
+        tk.Label(form,text="Employee",bg=LIGHT).grid(row=0,column=0,padx=6,pady=5,sticky="w")
+        self.payroll_employee_combo=ttk.Combobox(form,textvariable=self.payroll_employee,state="readonly",width=34); self.payroll_employee_combo.grid(row=0,column=1,padx=6,pady=5,sticky="w")
+        tk.Label(form,text="Period Date",bg=LIGHT).grid(row=0,column=2,padx=6,pady=5,sticky="w"); tk.Entry(form,textvariable=self.payroll_period,width=14).grid(row=0,column=3,padx=6,pady=5,sticky="w")
+        labels=(("salary","Salary"),("transport","Transport"),("overtime","Overtime"),("commission","Commission"),("schooling","Schooling"),("bonus","Bonus"),("thirteenth_month","13th Month"))
+        for index,(key,label) in enumerate(labels):
+            row=1+index//4; column=(index%4)*2
+            tk.Label(form,text=label,bg=LIGHT).grid(row=row,column=column,padx=6,pady=5,sticky="w")
+            tk.Entry(form,textvariable=self.payroll_vars[key],width=16).grid(row=row,column=column+1,padx=6,pady=5,sticky="w")
+        self.payroll_result=tk.StringVar(value="Gross: 0 | Tax: 0 | Employee NSSF: 0 | Net: 0")
+        tk.Label(form,textvariable=self.payroll_result,bg=LIGHT,fg=NAVY,font=("Segoe UI",10,"bold")).grid(row=3,column=0,columnspan=6,padx=6,pady=9,sticky="w")
+        self.action_button(form,"Calculate",self.calculate_payroll).grid(row=3,column=6,padx=5,pady=7)
+        self.action_button(form,"Save Payroll",self.save_payroll).grid(row=3,column=7,padx=5,pady=7)
+        self.payroll_tree=self.table(run,[("number","Payroll No.",135),("period","Period",95),("employee","Employee",190),("currency","Currency",65),
+            ("gross","Gross",105),("tax","Tax",95),("nssf","Employee NSSF",110),("net","Net Salary",110),("status","Status",75)])
+        self.load_payroll()
+
+    def employee_dialog(self,employee=None):
+        window=tk.Toplevel(self); window.title("Employee File"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
+        data=employee or {}; fields={key:tk.StringVar(value=str(data.get(key,""))) for key in ("employee_number","full_name","national_id","mof_number","nssf_number","address","contact_number","job_title","hire_date","leave_date","base_salary","salary_account","payable_account")}
+        if not fields["employee_number"].get(): fields["employee_number"].set("1000")
+        marital=tk.StringVar(value=data.get("marital_status","single")); children=tk.StringVar(value=str(data.get("children",0))); currency=tk.StringVar(value=data.get("currency","LBP")); active=tk.BooleanVar(value=bool(data.get("active",1)))
+        rows=(("employee_number","Employee ID / 4-digit prefix"),("full_name","Full Name"),("national_id","National ID"),("mof_number","MOF Number"),("nssf_number","NSSF Number"),("address","Address"),("contact_number","Contact Number"),("job_title","Job Title"),("hire_date","Hire Date"),("leave_date","Leave Date"),("base_salary","Base Salary"),("salary_account","Salary Expense Account"),("payable_account","Salary Payable Account"))
+        for index,(key,label) in enumerate(rows):
+            column=0 if index<7 else 2; row=index if index<7 else index-7
+            tk.Label(window,text=label,bg=LIGHT).grid(row=row,column=column,padx=10,pady=5,sticky="w"); tk.Entry(window,textvariable=fields[key],width=28).grid(row=row,column=column+1,padx=10,pady=5)
+        tk.Label(window,text="Marital Status",bg=LIGHT).grid(row=7,column=0,padx=10,pady=5,sticky="w"); ttk.Combobox(window,textvariable=marital,values=["single","married"],state="readonly",width=25).grid(row=7,column=1)
+        tk.Label(window,text="Children",bg=LIGHT).grid(row=8,column=0,padx=10,pady=5,sticky="w"); tk.Entry(window,textvariable=children,width=28).grid(row=8,column=1)
+        tk.Label(window,text="Currency",bg=LIGHT).grid(row=7,column=2,padx=10,pady=5,sticky="w"); ttk.Combobox(window,textvariable=currency,values=["LBP","USD","EUR","AED"],state="readonly",width=25).grid(row=7,column=3)
+        tk.Checkbutton(window,text="Active",variable=active,bg=LIGHT).grid(row=8,column=2,columnspan=2)
+        def save():
+            payload={key:var.get().strip() for key,var in fields.items()}; payload.update({"id":data.get("id"),"marital_status":marital.get(),"children":children.get(),"currency":currency.get(),"active":active.get()})
+            try: saved=self.client.save_employee(payload)
+            except Exception as exc: return messagebox.showerror("Employee",str(exc),parent=window)
+            window.destroy(); self.load_payroll(); messagebox.showinfo("Employee",f'Employee {saved["employee_number"]} saved successfully')
+        self.action_button(window,"Save Employee",save).grid(row=9,column=0,columnspan=4,pady=14)
+
+    def edit_selected_employee(self):
+        selected=self.employee_tree.selection()
+        if not selected: return messagebox.showwarning("Employees","Select an employee first")
+        employee=next((row for row in getattr(self,"employee_rows",[]) if str(row["id"])==str(selected[0])),None)
+        if employee: self.employee_dialog(employee)
+
+    def load_payroll(self):
+        if not hasattr(self,"employee_tree"): return
+        try: self.employee_rows=self.client.employees(); payroll=self.client.payroll()
+        except Exception as exc: return messagebox.showerror("Payroll",str(exc))
+        self.employee_tree.delete(*self.employee_tree.get_children())
+        for row in self.employee_rows: self.employee_tree.insert("","end",iid=str(row["id"]),values=(row["employee_number"],row["full_name"],row["job_title"],row.get("branch_name") or "",row["currency"],row["base_salary"],row["nssf_number"],"Yes" if row["active"] else "No"))
+        self.payroll_employee_map={f'{row["employee_number"]} - {row["full_name"]}':row for row in self.employee_rows if row["active"]}
+        self.payroll_employee_combo["values"]=list(self.payroll_employee_map)
+        if not self.payroll_employee.get() and self.payroll_employee_map: self.payroll_employee.set(next(iter(self.payroll_employee_map)))
+        self.payroll_tree.delete(*self.payroll_tree.get_children())
+        for row in payroll: self.payroll_tree.insert("","end",iid=str(row["id"]),values=(row["payroll_number"],row["period_date"],row["full_name"],row["currency"],f'{float(row["gross_salary"]):,.2f}',f'{float(row["income_tax"]):,.2f}',f'{float(row["employee_nssf"]):,.2f}',f'{float(row["net_salary"]):,.2f}',row["status"]))
+
+    def payroll_payload(self):
+        employee=self.payroll_employee_map.get(self.payroll_employee.get())
+        if not employee: raise ValueError("Select an employee")
+        payload={"employee_id":employee["id"],"period_date":self.payroll_period.get().strip()}
+        payload.update({key:var.get().strip() or "0" for key,var in self.payroll_vars.items()}); return payload
+
+    def calculate_payroll(self):
+        try: result=self.client.calculate_payroll(self.payroll_payload())
+        except Exception as exc: return messagebox.showerror("Payroll",str(exc))
+        self.payroll_result.set(f'Gross: {result["gross_salary"]:,.2f} | Tax: {result["income_tax"]:,.2f} | Employee NSSF: {result["employee_nssf"]:,.2f} | Net: {result["net_salary"]:,.2f} {result["currency"]}')
+
+    def save_payroll(self):
+        try: saved=self.client.save_payroll(self.payroll_payload())
+        except Exception as exc: return messagebox.showerror("Payroll",str(exc))
+        self.load_payroll(); messagebox.showinfo("Payroll",f'Payroll {saved["payroll_number"]} saved as draft')
 
     def build_journal(self):
         filters=tk.Frame(self.journal_tab,bg=LIGHT); filters.pack(fill="x",padx=10,pady=(10,0))

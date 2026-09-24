@@ -116,3 +116,15 @@ class ApiClient:
     def exchange_rates(self): return self.request("GET","/api/exchange-rates")["items"]
     def save_exchange_rate(self,item): return self.request("POST","/api/exchange-rates",item)
     def restore_euro_rates(self): return self.request("POST","/api/exchange-rates/restore-euro",{})
+    def employees(self): return self.request("GET","/api/employees")["items"]
+    def next_employee_number(self,prefix="1000"):
+        return self.request("GET",f"/api/employees/next-number?{urlencode({'prefix':prefix})}")["employee_number"]
+    def save_employee(self,item): return self.request("POST","/api/employees",item)["employee"]
+    def payroll(self,from_date=None,to_date=None):
+        query=urlencode({k:v for k,v in {"from_date":from_date,"to_date":to_date}.items() if v})
+        return self.request("GET","/api/payroll"+(f"?{query}" if query else ""))["items"]
+    def calculate_payroll(self,item): return self.request("POST","/api/payroll/calculate",item)
+    def save_payroll(self,item): return self.request("POST","/api/payroll",item)["payroll"]
+    def payroll_settings(self,date=None):
+        return self.request("GET","/api/payroll/settings"+(f"?{urlencode({'date':date})}" if date else ""))
+    def save_payroll_settings(self,item): return self.request("POST","/api/payroll/settings",item)
