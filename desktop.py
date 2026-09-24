@@ -1115,6 +1115,7 @@ class SaberApp(tk.Tk):
         self.action_button(controls,"New Account",self.new_party_account).pack(side="left",padx=4)
         self.action_button(controls,"Save Customer / Supplier",self.save_party).pack(side="left",padx=6)
         self.action_button(controls,"Edit Selected",self.edit_selected_party).pack(side="left",padx=4)
+        self.action_button(controls,"Legal Documents",self.party_documents_dialog).pack(side="left",padx=4)
         details=tk.Frame(self.parties_tab,bg=LIGHT); details.pack(fill="x",padx=10,pady=(0,8))
         for label,var,width in (("Account Number (blank = automatic; optional 4-digit prefix)",self.party_account_number,18),("MOF Number",self.party_mof,18),("Address",self.party_address,28),("Contact Number",self.party_contact,18)):
             tk.Label(details,text=label,bg=LIGHT).pack(side="left",padx=(5,2)); tk.Entry(details,textvariable=var,width=width).pack(side="left",padx=4)
@@ -1142,6 +1143,42 @@ class SaberApp(tk.Tk):
         self.party_rows=rows; self.parties_tree.delete(*self.parties_tree.get_children())
         for row in rows: self.parties_tree.insert("","end",values=(row["id"],row.get("account_number") or "",row["name"],row.get("account_category") or row["kind"],row.get("tax_number") or "",row.get("mof_number") or "",row.get("address") or "",row.get("contact_number") or "",row["currency"]))
 
+    def party_documents_dialog(self):
+        selected=self.parties_tree.selection()
+        if not selected: return messagebox.showwarning("Legal Documents","Select a customer or supplier first")
+        party_id=int(self.parties_tree.item(selected[0],"values")[0]); party_name=self.parties_tree.item(selected[0],"values")[2]
+        window=tk.Toplevel(self); window.title(f"Legal Documents - {party_name}"); window.configure(bg=LIGHT); window.geometry("820x470"); window.transient(self)
+        controls=tk.Frame(window,bg=LIGHT); controls.pack(fill="x",padx=8,pady=8)
+        doc_type=tk.StringVar(value="MOF / VAT Certificate"); issue=tk.StringVar(); expiry=tk.StringVar(); notes=tk.StringVar(); file_path=tk.StringVar()
+        ttk.Combobox(controls,textvariable=doc_type,values=["MOF / VAT Certificate","Commercial Registration","ID / Passport","NSSF Document","Contract","Other"],state="readonly",width=24).pack(side="left",padx=3)
+        tk.Label(controls,text="Issue",bg=LIGHT).pack(side="left"); self.date_entry(controls,issue,11).pack(side="left",padx=3)
+        tk.Label(controls,text="Expiry",bg=LIGHT).pack(side="left"); self.date_entry(controls,expiry,11).pack(side="left",padx=3)
+        tk.Entry(controls,textvariable=notes,width=20).pack(side="left",padx=3)
+        tree=self.table(window,[("type","Document Type",180),("file","File Name",250),("issue","Issue Date",95),("expiry","Expiry Date",95),("size","Size",80),("uploaded","Uploaded",150)])
+        records={}
+        def refresh():
+            nonlocal records
+            try: rows=self.client.party_documents(party_id)
+            except Exception as exc: return messagebox.showerror("Legal Documents",str(exc),parent=window)
+            records={str(row["id"]):row for row in rows}; tree.delete(*tree.get_children())
+            for row in rows: tree.insert("","end",iid=str(row["id"]),values=(row["document_type"],row["file_name"],row.get("issue_date") or "",row.get("expiry_date") or "",row["size"],row["uploaded_at"]))
+        def upload():
+            path=filedialog.askopenfilename(filetypes=[("Documents","*.pdf *.png *.jpg *.jpeg"),("All files","*.*")])
+            if not path: return
+            try:
+                issue_date=formatted_user_date(issue.get()) if issue.get().strip() else ""; expiry_date=formatted_user_date(expiry.get()) if expiry.get().strip() else ""
+                self.client.upload_party_document(party_id,{"document_type":doc_type.get(),"issue_date":issue_date,"expiry_date":expiry_date,"notes":notes.get(),"file_name":Path(path).name,"mime_type":mimetypes.guess_type(path)[0] or "application/octet-stream"},Path(path).read_bytes())
+            except Exception as exc: return messagebox.showerror("Legal Documents",str(exc),parent=window)
+            refresh()
+        def download():
+            selected_doc=tree.selection()
+            if not selected_doc: return
+            record=records[selected_doc[0]]; path=filedialog.asksaveasfilename(initialfile=record["file_name"])
+            if path: Path(path).write_bytes(self.client.download_party_document(record["id"])["content"])
+        buttons=tk.Frame(window,bg=LIGHT); buttons.pack(pady=8)
+        self.action_button(buttons,"Upload Legal Document",upload).pack(side="left",padx=4); self.action_button(buttons,"Download Selected",download).pack(side="left",padx=4)
+        refresh()
+
     def build_transactions(self):
         buttons=tk.Frame(self.transactions_tab,bg=LIGHT); buttons.pack(fill="x",padx=10,pady=10)
         self.action_button(buttons,"Add Customer Receipt",lambda:self.payment_dialog("customer_receipt")).pack(side="left",padx=4)
@@ -1149,10 +1186,18 @@ class SaberApp(tk.Tk):
         tk.Button(buttons,text="Add Expense",command=self.expense_dialog,bg=GOLD,fg=NAVY,border=0,padx=16,pady=7).pack(side="left",padx=4)
         self.action_button(buttons,"Refresh",self.load_transactions).pack(side="left",padx=4)
         nested=ttk.Notebook(self.transactions_tab); nested.pack(fill="both",expand=True,padx=10,pady=(0,10))
-        payment_frame=tk.Frame(nested,bg=LIGHT); expense_frame=tk.Frame(nested,bg=LIGHT)
-        nested.add(payment_frame,text="Receipts & Payments"); nested.add(expense_frame,text="Expenses")
+        payment_frame=tk.Frame(nested,bg=LIGHT); expense_frame=tk.Frame(nested,bg=LIGHT); documents_frame=tk.Frame(nested,bg=LIGHT)
+        nested.add(payment_frame,text="Receipts & Payments"); nested.add(expense_frame,text="Expenses"); nested.add(documents_frame,text="Purchases / Expenses / Customs")
         self.payments_tree=self.table(payment_frame,[("date","Date",100),("kind","Type",130),("party","Customer / Supplier",220),("currency","Currency",80),("amount","Amount",120),("cash","Cash / Bank A/C",110),("reference","Reference",130),("description","Description",220)])
         self.expenses_tree=self.table(expense_frame,[("date","Date",95),("description","Description",190),("category","Category",110),("currency","Currency",70),("with_vat","Expense with VAT",120),("without_vat","Expense without VAT",130),("vat","VAT",80),("total","Total",100),("account","With VAT A/C",100),("no_vat_account","Without VAT A/C",110),("payment","Payment A/C",95)])
+        case_actions=tk.Frame(documents_frame,bg=LIGHT); case_actions.pack(fill="x",padx=8,pady=8)
+        self.action_button(case_actions,"New Purchase Case",lambda:self.document_case_dialog("purchase")).pack(side="left",padx=3)
+        self.action_button(case_actions,"New Expense Case",lambda:self.document_case_dialog("expense")).pack(side="left",padx=3)
+        self.action_button(case_actions,"New Customs Case",lambda:self.document_case_dialog("customs")).pack(side="left",padx=3)
+        self.action_button(case_actions,"Attach Document",self.attach_selected_case_document).pack(side="left",padx=3)
+        tk.Button(case_actions,text="Post to Accounting",command=self.post_selected_document_case,bg=GOLD,fg=NAVY,border=0,padx=14,pady=7).pack(side="left",padx=3)
+        self.action_button(case_actions,"Documents / Download",self.show_case_documents).pack(side="left",padx=3)
+        self.document_cases_tree=self.table(documents_frame,[("number","Case Number",135),("type","Case Type",90),("date","Date",95),("party","Supplier",180),("currency","Currency",70),("reference","Invoice / Reference",125),("customs","Customs Declaration",135),("base","Supplier Invoice",110),("vat","VAT",90),("total","Landed / Total",115),("attachments","Docs",55),("status","Status",80)])
         self.load_transactions()
 
     def payment_dialog(self,kind):
@@ -1211,11 +1256,95 @@ class SaberApp(tk.Tk):
         self.action_button(window,"Save Expense",save).grid(row=len(labels)+1,column=0,columnspan=2,pady=14)
 
     def load_transactions(self):
-        try: payments=self.client.payments(); expenses=self.client.expenses()
+        try: payments=self.client.payments(); expenses=self.client.expenses(); cases=self.client.document_cases()
         except Exception as exc: return messagebox.showerror("Payments / Expenses",str(exc))
         self.payments_tree.delete(*self.payments_tree.get_children()); self.expenses_tree.delete(*self.expenses_tree.get_children())
         for row in payments: self.payments_tree.insert("","end",values=(row["payment_date"],row["kind"],row["party_name"],row["currency"],f'{row["amount"]:,.2f}',row["cash_account"],row["reference"],row["description"]))
         for row in expenses: self.expenses_tree.insert("","end",values=(row["expense_date"],row["description"],row["category"],row["currency"],f'{row.get("with_vat_subtotal",row["subtotal"]):,.2f}',f'{row.get("without_vat_subtotal",0):,.2f}',f'{row["vat"]:,.2f}',f'{row["total"]:,.2f}',row["expense_account"],row.get("expense_without_vat_account","601100001"),row["payment_account"]))
+        self.document_case_rows={str(row["id"]):row for row in cases}; self.document_cases_tree.delete(*self.document_cases_tree.get_children())
+        for row in cases:
+            self.document_cases_tree.insert("","end",iid=str(row["id"]),values=(row["case_number"],row["case_type"].title(),row["document_date"],row["party_name"],row["currency"],row.get("reference") or "",row.get("customs_declaration_no") or "",f'{float(row["supplier_invoice_amount"]):,.2f}',f'{float(row["import_vat"]):,.2f}',f'{float(row["total"]):,.2f}',row["attachment_count"],row["status"].title()))
+
+    def document_case_dialog(self,case_type):
+        try: parties=[row for row in self.client.parties() if row["kind"] in ("supplier","both")]
+        except Exception as exc: return messagebox.showerror("Document Case",str(exc))
+        if not parties: return messagebox.showwarning("Document Case","Create a supplier first")
+        window=tk.Toplevel(self); window.title(f"New {case_type.title()} Case"); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
+        party_map={f'{row.get("account_number") or ""} - {row["name"]}':row for row in parties}; selected_party=tk.StringVar(value=next(iter(party_map)))
+        defaults={"document_date":datetime.now().strftime("%d-%m-%Y"),"currency":"USD","reference":"","description":"","customs_declaration_no":"","broker_name":"",
+            "supplier_invoice_amount":"0","freight":"0","insurance":"0","customs_duties":"0","import_vat":"0","broker_fees":"0","supplier_account":"","expense_account":"601100000","vat_account":"442660000","branch":"Head Office"}
+        values={key:tk.StringVar(value=value) for key,value in defaults.items()}
+        fields=[("Supplier",selected_party),("Date",values["document_date"]),("Currency",values["currency"]),("Invoice / Reference",values["reference"]),("Description",values["description"]),
+            ("Supplier Invoice Amount",values["supplier_invoice_amount"]),("Import / Purchase VAT",values["import_vat"])]
+        if case_type=="customs": fields.extend([("Customs Declaration No.",values["customs_declaration_no"]),("Customs Broker",values["broker_name"]),("Freight",values["freight"]),("Insurance",values["insurance"]),("Customs Duties",values["customs_duties"]),("Broker Fees",values["broker_fees"])])
+        fields.extend([("Supplier Account",values["supplier_account"]),("Expense / Landed Cost Account",values["expense_account"]),("VAT Account",values["vat_account"]),("Branch",values["branch"])])
+        for index,(label,var) in enumerate(fields):
+            row=index//2; column=(index%2)*2; tk.Label(window,text=label,bg=LIGHT).grid(row=row,column=column,sticky="w",padx=(12,4),pady=6)
+            if label=="Supplier": widget=ttk.Combobox(window,textvariable=var,values=list(party_map),state="readonly",width=31)
+            elif label=="Currency": widget=ttk.Combobox(window,textvariable=var,values=["USD","EUR","LBP","AED"],state="readonly",width=31)
+            elif label=="Branch": widget=self.branch_selector(window,var,31,False)
+            elif "Account" in label: widget=self.account_search_box(window,var,31)
+            elif label=="Date": widget=self.date_entry(window,var,34)
+            else: widget=tk.Entry(window,textvariable=var,width=34)
+            widget.grid(row=row,column=column+1,padx=(4,12),pady=6)
+        def save():
+            payload={key:var.get().split(" - ",1)[0].strip() if key.endswith("account") else var.get().strip() for key,var in values.items()}
+            try: payload["document_date"]=formatted_user_date(payload["document_date"])
+            except ValueError: return messagebox.showwarning("Document Case","Enter 8 date digits: DDMMYYYY",parent=window)
+            payload.update({"case_type":case_type,"party_id":party_map[selected_party.get()]["id"]})
+            try: created=self.client.save_document_case(payload)
+            except Exception as exc: return messagebox.showerror("Document Case",str(exc),parent=window)
+            window.destroy(); self.load_transactions(); messagebox.showinfo("Document Case",f'Draft {created["case_number"]} saved. Attach the required documents, then click Post to Accounting.')
+        self.action_button(window,"Save Draft Case",save).grid(row=(len(fields)+1)//2,column=0,columnspan=4,pady=14)
+
+    def selected_document_case(self):
+        selected=self.document_cases_tree.selection()
+        if not selected: messagebox.showwarning("Document Case","Select a case first"); return None
+        return self.document_case_rows.get(selected[0])
+
+    def attach_selected_case_document(self):
+        case=self.selected_document_case()
+        if not case: return
+        roles={"purchase":["supplier_invoice","other"],"expense":["expense_document","other"],"customs":["supplier_invoice","customs_declaration","broker_invoice","freight_document","other"]}[case["case_type"]]
+        window=tk.Toplevel(self); window.title(f'Attach to {case["case_number"]}'); window.configure(bg=LIGHT); window.transient(self); window.grab_set()
+        role=tk.StringVar(value=roles[0]); path_var=tk.StringVar()
+        tk.Label(window,text="Document Type",bg=LIGHT).grid(row=0,column=0,padx=12,pady=8); ttk.Combobox(window,textvariable=role,values=roles,state="readonly",width=28).grid(row=0,column=1,padx=12,pady=8)
+        tk.Label(window,text="File",bg=LIGHT).grid(row=1,column=0,padx=12,pady=8); tk.Entry(window,textvariable=path_var,width=42,state="readonly").grid(row=1,column=1,padx=12,pady=8)
+        def choose():
+            path=filedialog.askopenfilename(filetypes=[("Documents","*.pdf *.png *.jpg *.jpeg"),("All files","*.*")]); path_var.set(path)
+        self.action_button(window,"Choose File",choose).grid(row=1,column=2,padx=8)
+        def upload():
+            path=path_var.get()
+            if not path: return messagebox.showwarning("Document Case","Choose a file",parent=window)
+            try: self.client.upload_case_attachment(case["id"],role.get(),Path(path).name,mimetypes.guess_type(path)[0] or "application/octet-stream",Path(path).read_bytes())
+            except Exception as exc: return messagebox.showerror("Document Case",str(exc),parent=window)
+            window.destroy(); self.load_transactions(); messagebox.showinfo("Document Case","Document attached successfully")
+        self.action_button(window,"Upload",upload).grid(row=2,column=0,columnspan=3,pady=12)
+
+    def post_selected_document_case(self):
+        case=self.selected_document_case()
+        if not case: return
+        if not messagebox.askyesno("Post Document Case",f'Post {case["case_number"]} to accounting? After posting it will create the automatic journal entry.'): return
+        try: posted=self.client.post_document_case(case["id"])
+        except Exception as exc: return messagebox.showerror("Document Case",str(exc))
+        self.load_transactions(); self.load_invoices(); self.load_journal(); self.load_trial(); messagebox.showinfo("Document Case",f'{posted["case_number"]} posted successfully')
+
+    def show_case_documents(self):
+        case=self.selected_document_case()
+        if not case: return
+        try: documents=self.client.case_attachments(case["id"])
+        except Exception as exc: return messagebox.showerror("Document Case",str(exc))
+        if not documents: return messagebox.showinfo("Document Case","No documents attached")
+        window=tk.Toplevel(self); window.title(f'Documents - {case["case_number"]}'); window.configure(bg=LIGHT); window.geometry("700x360")
+        tree=self.table(window,[("role","Document Type",170),("name","File Name",300),("size","Size",90),("date","Uploaded",160)])
+        records={str(row["id"]):row for row in documents}
+        for row in documents: tree.insert("","end",iid=str(row["id"]),values=(row["document_role"],row["file_name"],row["size"],row["uploaded_at"]))
+        def download():
+            selected=tree.selection()
+            if not selected: return
+            record=records[selected[0]]; path=filedialog.asksaveasfilename(initialfile=record["file_name"])
+            if path: Path(path).write_bytes(self.client.download_case_attachment(record["id"])["content"])
+        self.action_button(window,"Download Selected",download).pack(pady=8)
 
     def build_payroll(self):
         nested=ttk.Notebook(self.payroll_tab); nested.pack(fill="both",expand=True,padx=8,pady=8)
