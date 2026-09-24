@@ -497,18 +497,21 @@ class Database:
             currency_issue = str(item.get("currency_issue") or "")
             requested_status=str(item.get("status") or "").strip().lower()
             status=requested_status if requested_status in ("posted","review") else ("posted" if total == subtotal + vat and not currency_issue.startswith(("conflicting:", "unsupported:")) else "review")
-            supplier_account = str(item.get("supplier_account") or DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]).strip()
+            default_party_account=DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"] if kind=="sale" else DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]
+            supplier_account = str(item.get("supplier_account") or default_party_account).strip()
             party_account=self._ensure_party_account(db,party)
             if kind=="purchase" and (not item.get("supplier_account") or supplier_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]):
                 supplier_account=party_account
-            vat_account = str(item.get("vat_account") or VAT_ACCOUNT_9).strip()
-            expense_account = str(item.get("expense_account") or EXPENSE_ACCOUNT_9).strip()
+            elif kind=="sale" and not item.get("supplier_account") and item.get("source_file")=="Sales Invoice":
+                supplier_account=party_account
+            vat_account = str(item.get("vat_account") or (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"] if kind=="sale" else VAT_ACCOUNT_9)).strip()
+            expense_account = str(item.get("expense_account") or (DEFAULT_LEBANESE_ACCOUNTS["sales"] if kind=="sale" else EXPENSE_ACCOUNT_9)).strip()
             expense_no_vat_account=str(item.get("expense_no_vat_account") or EXPENSE_NO_VAT_ACCOUNT_9).strip()
             supplier_side=self._side(item.get("supplier_side"),"C"); vat_side=self._side(item.get("vat_side"),"D"); expense_side=self._side(item.get("expense_side"),"D"); expense_no_vat_side=self._side(item.get("expense_no_vat_side"),"D")
             account_definitions = [
-                (supplier_account, "Supplier Account", "liability"),
-                (vat_account, "VAT Account", "asset"),
-                (expense_account, "Asset Account" if entry_type=="assets" else "Expense Account", "asset" if entry_type=="assets" else "expense"),
+                (supplier_account, "Client Account" if kind=="sale" else "Supplier Account", "asset" if kind=="sale" else "liability"),
+                (vat_account, "Output VAT Account" if kind=="sale" else "VAT Account", "liability" if kind=="sale" else "asset"),
+                (expense_account, "Sales Revenue Account" if kind=="sale" else ("Asset Account" if entry_type=="assets" else "Expense Account"), "income" if kind=="sale" else ("asset" if entry_type=="assets" else "expense")),
                 (expense_no_vat_account,"Expenses without VAT","expense"),
             ]
             for code, name, account_type in account_definitions:
@@ -537,7 +540,7 @@ class Database:
             entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,branch_id,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (entry_number, item.get("invoice_date"), f"{entry_type.replace('_',' ').title()} {item['invoice_number']}", "invoice", invoice_id, item.get("currency", "USD"),branch_id, user_id, utcnow()))
             if kind == "sale":
-                lines = [(DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"], total, 0), (DEFAULT_LEBANESE_ACCOUNTS["sales"], 0, subtotal), (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"], 0, vat)]
+                lines = [(supplier_account, total, 0), (expense_account, 0, subtotal), (vat_account, 0, vat)]
             else:
                 lines = [self._line_for_side(expense_account,deductible,expense_side),self._line_for_side(expense_no_vat_account,non_deductible,expense_no_vat_side),self._line_for_side(vat_account,vat,vat_side),self._line_for_side(supplier_account,total,supplier_side)]
             lines=[line for line in lines if Decimal(str(line[1])) or Decimal(str(line[2]))]
@@ -748,10 +751,12 @@ class Database:
             party_account = self._ensure_party_account(db, party)
             if kind == "purchase" and supplier_account == DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"] and party_account:
                 supplier_account = party_account
+            elif kind == "sale" and (not item.get("supplier_account") or supplier_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"]):
+                supplier_account = party_account
             for code, name, account_type in (
-                (supplier_account, "Supplier Account", "liability"),
-                (vat_account, "VAT Account", "asset"),
-                (expense_account, "Asset Account" if entry_type=="assets" else "Expense Account", "asset" if entry_type=="assets" else "expense"),
+                (supplier_account, "Client Account" if kind=="sale" else "Supplier Account", "asset" if kind=="sale" else "liability"),
+                (vat_account, "Output VAT Account" if kind=="sale" else "VAT Account", "liability" if kind=="sale" else "asset"),
+                (expense_account, "Sales Revenue Account" if kind=="sale" else ("Asset Account" if entry_type=="assets" else "Expense Account"), "income" if kind=="sale" else ("asset" if entry_type=="assets" else "expense")),
                 (expense_no_vat_account,"Expenses without VAT","expense"),
             ):
                 db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)", (code, name, account_type))
@@ -775,7 +780,7 @@ class Database:
                     "invoice", invoice_id, currency,branch_id, user_id, utcnow()))
                 entry_id = created.lastrowid
             if kind == "sale":
-                lines = [(DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"], total, Decimal("0")), (DEFAULT_LEBANESE_ACCOUNTS["sales"], Decimal("0"), subtotal), (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"], Decimal("0"), vat)]
+                lines = [(supplier_account, total, Decimal("0")), (expense_account, Decimal("0"), subtotal), (vat_account, Decimal("0"), vat)]
             else:
                 lines=[self._line_for_side(expense_account,deductible,expense_side),self._line_for_side(expense_no_vat_account,non_deductible,expense_no_vat_side),self._line_for_side(vat_account,vat,vat_side),self._line_for_side(supplier_account,total,supplier_side)]
             lines=[line for line in lines if Decimal(str(line[1])) or Decimal(str(line[2]))]
