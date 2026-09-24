@@ -253,6 +253,25 @@ class SaberAccountingTest(unittest.TestCase):
             codes={item["code"] for item in db.trial_balance(posting_status="review")}
             self.assertTrue({str(row["supplier_account"]),"442700000","713100000"}.issubset(codes))
 
+    def test_legal_documents_and_three_document_case_workflows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"documents.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            supplier=db.save_party({"kind":"supplier","name":"Customs Supplier","currency":"USD"},user["id"])
+            document_id=db.add_party_document(supplier["id"],{"document_type":"MOF / VAT Certificate","issue_date":"01-01-2026","expiry_date":"31-12-2026","file_name":"mof.pdf","mime_type":"application/pdf"},b"PDF",user["id"])
+            self.assertEqual(db.get_party_document(document_id)["content"],b"PDF")
+            for case_type,roles in (("purchase",("supplier_invoice",)),("expense",("expense_document",)),("customs",("supplier_invoice","customs_declaration","broker_invoice"))):
+                case=db.save_document_case({"case_type":case_type,"document_date":"24-09-2026","party_id":supplier["id"],"currency":"USD",
+                    "supplier_invoice_amount":100,"freight":10 if case_type=="customs" else 0,"insurance":5 if case_type=="customs" else 0,
+                    "customs_duties":20 if case_type=="customs" else 0,"import_vat":11,"broker_fees":5 if case_type=="customs" else 0},user["id"])
+                self.assertEqual(case["status"],"draft")
+                with self.assertRaisesRegex(ValueError,"Attach required"):
+                    db.post_document_case(case["id"],user["id"])
+                for role in roles: db.add_case_attachment(case["id"],role,role+".pdf","application/pdf",b"PDF",user["id"])
+                posted=db.post_document_case(case["id"],user["id"])
+                self.assertEqual(posted["status"],"posted"); self.assertIsNotNone(posted["invoice_id"])
+                self.assertEqual(len(db.list_attachments(posted["invoice_id"])),len(roles))
+
     def test_direct_journal_voucher_new_edit_multiple_lines_and_number(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"voucher.db"); db.initialize("secret")
