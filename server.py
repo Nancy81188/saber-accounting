@@ -83,6 +83,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                 attachment["content"]=base64.b64encode(attachment["content"]).decode("ascii")
             except KeyError: return self._json(404,{"error":"Attachment not found"})
             return self._json(200,attachment)
+        if path == "/api/document-cases": return self._json(200,{"items":self.db.list_document_cases()})
+        if path.startswith("/api/document-cases/") and path.endswith("/attachments"):
+            try: items=self.db.list_case_attachments(int(path.split("/")[-2]))
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"items":items})
+        if path.startswith("/api/case-attachments/"):
+            try:
+                attachment=self.db.get_case_attachment(int(path.rsplit("/",1)[-1])); attachment["content"]=base64.b64encode(attachment["content"]).decode("ascii")
+            except KeyError: return self._json(404,{"error":"Case attachment not found"})
+            return self._json(200,attachment)
+        if path.startswith("/api/parties/") and path.endswith("/documents"):
+            try: items=self.db.list_party_documents(int(path.split("/")[-2]))
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"items":items})
+        if path.startswith("/api/party-documents/"):
+            try:
+                document=self.db.get_party_document(int(path.rsplit("/",1)[-1])); document["content"]=base64.b64encode(document["content"]).decode("ascii")
+            except KeyError: return self._json(404,{"error":"Party document not found"})
+            return self._json(200,document)
         if path == "/api/accounts":
             return self._json(200, {"items": self.db.list_accounts()})
         if path == "/api/accounts/next-number":
@@ -292,6 +311,26 @@ class ApiHandler(BaseHTTPRequestHandler):
                 attachment_id=self.db.add_attachment(int(path.split("/")[-2]),body.get("file_name"),body.get("mime_type"),raw,user["id"])
             except Exception as exc: return self._json(400,{"error":str(exc)})
             return self._json(201,{"attachment_id":attachment_id})
+        if path == "/api/document-cases":
+            try: result=self.db.save_document_case(body,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"case":result})
+        if path.startswith("/api/document-cases/") and path.endswith("/attachments"):
+            try:
+                raw=base64.b64decode(body.get("content","").encode("ascii"),validate=True)
+                attachment_id=self.db.add_case_attachment(int(path.split("/")[-2]),body.get("document_role"),body.get("file_name"),body.get("mime_type"),raw,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"attachment_id":attachment_id})
+        if path.startswith("/api/document-cases/") and path.endswith("/post"):
+            try: result=self.db.post_document_case(int(path.split("/")[-2]),user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(200,{"case":result})
+        if path.startswith("/api/parties/") and path.endswith("/documents"):
+            try:
+                raw=base64.b64decode(body.get("content","").encode("ascii"),validate=True)
+                document_id=self.db.add_party_document(int(path.split("/")[-2]),body,raw,user["id"])
+            except Exception as exc: return self._json(400,{"error":str(exc)})
+            return self._json(201,{"document_id":document_id})
         if path == "/api/fiscal-years/close":
             if user["role"] != "admin": return self._json(403,{"error":"Administrator permission required"})
             try:
