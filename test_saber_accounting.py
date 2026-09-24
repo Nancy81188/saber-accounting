@@ -272,6 +272,22 @@ class SaberAccountingTest(unittest.TestCase):
                 self.assertEqual(posted["status"],"posted"); self.assertIsNotNone(posted["invoice_id"])
                 self.assertEqual(len(db.list_attachments(posted["invoice_id"])),len(roles))
 
+    def test_cash_flow_aging_and_comparative_reports(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db=Database(Path(folder)/"advanced_reports.db"); db.initialize("secret")
+            user=db.user_for_token(db.login("admin","secret")["token"])
+            customer=db.save_party({"kind":"customer","name":"Report Customer","currency":"USD"},user["id"])
+            db.import_invoice({"invoice_number":"AR-1","invoice_date":"01-01-2026","due_date":"15-01-2026","party_name":"Report Customer","kind":"sale","currency":"USD","subtotal":100,"vat":11,"total":111,"status":"posted"},user["id"])
+            db.import_invoice({"invoice_number":"AR-0","invoice_date":"01-01-2025","party_name":"Report Customer","kind":"sale","currency":"USD","subtotal":80,"vat":8.8,"total":88.8,"status":"posted"},user["id"])
+            db.add_payment({"kind":"customer_receipt","payment_date":"20-01-2026","party_id":customer["id"],"currency":"USD","amount":50,"cash_account":"531","party_account":customer["account_number"]},user["id"])
+            aging=db.aging_report("20-02-2026","sale","USD")
+            self.assertTrue(any(row["invoice_number"]=="AR-1" and row["bucket"]=="31-60" for row in aging))
+            cash=db.cash_flow("2026-01-01","2026-12-31","USD")
+            self.assertAlmostEqual(sum(row["net"] for row in cash),50.0)
+            comparative=db.comparative_reports("2026-01-01","2026-12-31","USD")
+            sales=next(row for row in comparative["items"] if row["type"]=="income")
+            self.assertAlmostEqual(sales["current"],100.0); self.assertAlmostEqual(sales["prior"],80.0)
+
     def test_direct_journal_voucher_new_edit_multiple_lines_and_number(self):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"voucher.db"); db.initialize("secret")
