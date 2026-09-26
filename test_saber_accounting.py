@@ -389,9 +389,11 @@ class SaberAccountingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             db=Database(Path(folder)/"lebanese.db"); db.initialize("secret")
             accounts=db.list_accounts()
-            self.assertEqual(len(accounts),len(LEBANESE_ACCOUNTS)+3)
+            self.assertEqual(len(accounts),len(LEBANESE_ACCOUNTS)+6+19)  # includes sale/credit-note posting + bank commission & exchange-difference accounts
             codes={row["code"] for row in accounts}
-            self.assertTrue({"1","2","3","4","5","6","7","4011","4111","4426.6","4427","6011","713"}.issubset(codes))
+            self.assertTrue({"1","2","3","4","5","6","7","4011","4111","4426.6","4427","6011","713",
+                             "7011","701100001","711100001","7130","713000001","709000001","7190","719000001"}.issubset(codes))
+            self.assertEqual(next(row["parent_code"] for row in accounts if row["code"]=="719000001"),"7190")
             self.assertFalse({"1100","2100","2200","1300","4100","5100","9999"} & codes)
             user=db.user_for_token(db.login("admin","secret")["token"])
             purchase={"invoice_number":"LB-P","invoice_date":"21-09-2026","party_name":"Supplier",
@@ -400,7 +402,7 @@ class SaberAccountingTest(unittest.TestCase):
                   "kind":"sale","currency":"USD","subtotal":200,"vat":22,"total":222}
             db.import_invoice(purchase,user["id"]); db.import_invoice(sale,user["id"])
             trial_codes={row["code"] for row in db.trial_balance()}
-            self.assertTrue({"4111","442660000","4427","601100000","713"}.issubset(trial_codes))
+            self.assertTrue({"4111","44210","4427","601100000","713"}.issubset(trial_codes))
             self.assertTrue(any(code.startswith("4011") and len(code)==9 for code in trial_codes))
 
     def test_suppliers_receive_unique_nine_digit_accounts(self):
@@ -433,7 +435,7 @@ class SaberAccountingTest(unittest.TestCase):
                 "kind":"expenses","entry_type":"expenses","currency":"USD","subtotal":100,"vat":0,"total":100},user["id"])
             saved=next(row for row in db.list_invoices() if row["id"]==invoice_id)
             self.assertEqual(saved["vat"],"0"); self.assertEqual(saved["total"],"100")
-            self.assertEqual(saved["expense_account"],"601100000"); self.assertEqual(saved["expense_no_vat_account"],"601100001"); self.assertEqual(saved["vat_account"],"442660000")
+            self.assertEqual(saved["expense_account"],"601100000"); self.assertEqual(saved["expense_no_vat_account"],"601100001"); self.assertEqual(saved["vat_account"],"44216")  # expenses VAT account
             changed=db.update_invoice(invoice_id,{"invoice_number":"NV-1","invoice_date":"22-09-2026","party_name":"Supplier NV",
                 "kind":"assets","entry_type":"assets","currency":"USD","subtotal":100,"vat":0,"total":100,"debit":75,"credit":25,
                 "supplier_account":saved["supplier_account"],"vat_account":saved["vat_account"],"expense_account":"601100123","expense_no_vat_account":"601100001",

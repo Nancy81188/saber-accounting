@@ -6,8 +6,10 @@ import json
 import secrets
 import shutil
 import sqlite3
+import tempfile
+import threading
 import urllib.request
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -15,8 +17,11 @@ from pathlib import Path
 from lebanese_accounts import DEFAULT_LEBANESE_ACCOUNTS, LEBANESE_ACCOUNTS
 
 EXPENSE_ACCOUNT_9 = "601100000"
-VAT_ACCOUNT_9 = "442660000"
+VAT_ACCOUNT_9 = "44210"  # VAT on purchases (was 442660000)
 EXPENSE_NO_VAT_ACCOUNT_9 = "601100001"
+SESSION_HOURS = 24
+USER_VALIDITY_DAYS = 365
+PERMISSION_MODULES = ("payroll", "vat")
 
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -159,6 +164,37 @@ CREATE TABLE IF NOT EXISTS payroll_records (
  created_by INTEGER REFERENCES users(id), created_at TEXT NOT NULL, UNIQUE(employee_id,period_date)
 );
 CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS expense_attachments (
+ id INTEGER PRIMARY KEY, expense_id INTEGER NOT NULL REFERENCES expenses(id) ON DELETE CASCADE,
+ file_name TEXT NOT NULL, mime_type TEXT NOT NULL, content BLOB NOT NULL, uploaded_by INTEGER, uploaded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vat_settings (
+ year INTEGER PRIMARY KEY, provisional_ratio TEXT, updated_by INTEGER, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS departments (
+ id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS projects (
+ id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, party_id INTEGER REFERENCES parties(id),
+ start_date TEXT, end_date TEXT, status TEXT NOT NULL DEFAULT 'open', notes TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS budgets (
+ id INTEGER PRIMARY KEY, year INTEGER NOT NULL, currency TEXT NOT NULL, account_code TEXT NOT NULL,
+ department_id INTEGER NOT NULL DEFAULT 0, project_id INTEGER NOT NULL DEFAULT 0, month INTEGER NOT NULL DEFAULT 0 CHECK(month BETWEEN 0 AND 12),
+ amount TEXT NOT NULL, updated_by INTEGER, updated_at TEXT,
+ UNIQUE(year,currency,account_code,department_id,project_id,month)
+);
+CREATE TABLE IF NOT EXISTS vat_adjustments (
+ id INTEGER PRIMARY KEY, year INTEGER NOT NULL, quarter INTEGER NOT NULL CHECK(quarter BETWEEN 1 AND 4),
+ currency TEXT NOT NULL, adjustment_type TEXT NOT NULL CHECK(adjustment_type IN ('output','input','non_deductible')),
+ amount TEXT NOT NULL, reason TEXT NOT NULL, created_by INTEGER, created_by_name TEXT, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS vat_returns (
+ id INTEGER PRIMARY KEY, year INTEGER NOT NULL, quarter INTEGER NOT NULL CHECK(quarter BETWEEN 1 AND 4),
+ net_lbp TEXT NOT NULL, credit_brought_forward_lbp TEXT NOT NULL DEFAULT '0', payable_lbp TEXT NOT NULL DEFAULT '0',
+ credit_carried_forward_lbp TEXT NOT NULL DEFAULT '0', snapshot TEXT NOT NULL,
+ saved_by INTEGER, saved_by_name TEXT, saved_at TEXT NOT NULL, UNIQUE(year,quarter)
+);
 """
 
 LEGACY_ACCOUNT_MAP = {
@@ -173,6 +209,38 @@ LEGACY_ACCOUNT_MAP = {
 def utcnow():
     return datetime.now(timezone.utc).isoformat()
 
+def parse_ts(value):
+    """Parse a stored ISO timestamp into an aware UTC datetime.
+    Timestamps without an explicit offset are assumed to be UTC. Returns None if unparseable.
+    Comparing timestamps as datetimes (not as text) avoids the timezone-offset bug where
+    two ISO strings with different offsets sort incorrectly as plain strings."""
+    if value in (None, ""):
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+def iso_date(value, field="Date"):
+    """Accept DD-MM-YYYY, DDMMYYYY, YYYY-MM-DD or YYYYMMDD and return YYYY-MM-DD."""
+    text = str(value or "").strip()
+    for pattern in ("%Y-%m-%d", "%d-%m-%Y", "%d%m%Y", "%Y%m%d", "%d/%m/%Y"):
+        try: return datetime.strptime(text, pattern).strftime("%Y-%m-%d")
+        except ValueError: pass
+    raise ValueError(f"{field} must use DD-MM-YYYY")
+
+def display_date(value):
+    try: return datetime.strptime(iso_date(value), "%Y-%m-%d").strftime("%d-%m-%Y")
+    except ValueError: return str(value or "")
+
+def parse_permissions(value):
+    try: data = json.loads(value or "{}") if isinstance(value, str) else dict(value or {})
+    except (TypeError, ValueError): data = {}
+    return {module: bool(data.get(module, True)) for module in PERMISSION_MODULES}
+
 def hash_password(password, salt=None):
     salt = salt or secrets.token_bytes(16)
     digest = hashlib.scrypt(password.encode(), salt=salt, n=2**14, r=8, p=1)
@@ -184,22 +252,28 @@ def verify_password(password, encoded):
     return hmac.compare_digest(candidate, digest_hex)
 
 class Database:
+    _locks = {}
+    _locks_guard = threading.Lock()
+
     def __init__(self, path):
         self.path = str(Path(path))
+        with self._locks_guard:
+            self._lock = self._locks.setdefault(str(Path(path).resolve()), threading.RLock())
 
     @contextmanager
     def connect(self):
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        with self._lock:
+            connection = sqlite3.connect(self.path)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            try:
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     def initialize(self, admin_password):
         with self.connect() as db:
@@ -242,6 +316,7 @@ class Database:
                 if column not in invoice_columns:
                     db.execute(f"ALTER TABLE invoices ADD COLUMN {column} {definition}")
             item_columns={row["name"] for row in db.execute("PRAGMA table_info(invoice_items)")}
+            if "item_code" not in item_columns: db.execute("ALTER TABLE invoice_items ADD COLUMN item_code TEXT")
             for column in ("deductible_subtotal","non_deductible_subtotal"):
                 if column not in item_columns: db.execute(f"ALTER TABLE invoice_items ADD COLUMN {column} TEXT NOT NULL DEFAULT '0'")
             journal_line_columns={row["name"] for row in db.execute("PRAGMA table_info(journal_lines)")}
@@ -273,8 +348,80 @@ class Database:
             if "retro_from" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_from TEXT")
             if "retro_to" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_to TEXT")
             payroll_setting_columns={row["name"] for row in db.execute("PRAGMA table_info(payroll_settings)")}
+            for column,default in (("transport_daily_exempt","450000"),("default_transport_days","26"),("schooling_annual_exempt","6000000"),("schooling_max_children","3"),
+                                   ("tax_rounding","0"),("minimum_wage","0"),("max_children_deduction","5"),("family_allowance_spouse","0"),("family_allowance_child","0"),
+                                   ("family_allowance_cap","0"),("family_allowance_max_children","5")):
+                if column not in payroll_setting_columns: db.execute(f"ALTER TABLE payroll_settings ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default}'")
+            payroll_record_columns={row["name"] for row in db.execute("PRAGMA table_info(payroll_records)")}
+            for column in ("transport_days","exempt_transport","exempt_schooling","family_allowance","regular_tax","one_off_tax","compliance_notes"):
+                if column not in payroll_record_columns: db.execute(f"ALTER TABLE payroll_records ADD COLUMN {column} TEXT")
             if "employee_account_map" not in payroll_setting_columns: db.execute("ALTER TABLE payroll_settings ADD COLUMN employee_account_map TEXT NOT NULL DEFAULT '{}'")
             if "manager_account_map" not in payroll_setting_columns: db.execute("ALTER TABLE payroll_settings ADD COLUMN manager_account_map TEXT NOT NULL DEFAULT '{}'")
+            if "retro_tax" not in payroll_columns: db.execute("ALTER TABLE payroll_records ADD COLUMN retro_tax TEXT NOT NULL DEFAULT '0'")
+            db.execute("""UPDATE OR IGNORE payroll_records SET period_date=substr(period_date,7,4)||'-'||substr(period_date,4,2)||'-'||substr(period_date,1,2)
+                WHERE period_date GLOB '??-??-????'""")
+            # Older versions saved payroll dates exactly as typed (DD-MM-YYYY, DDMMYYYY...). Store them as YYYY-MM-DD.
+            for table,column in (("payroll_settings","date_from"),("payroll_settings","date_to"),("payroll_records","period_date"),
+                                 ("payroll_records","retro_from"),("payroll_records","retro_to")):
+                for row in db.execute(f"SELECT id,{column} value FROM {table} WHERE {column} IS NOT NULL AND {column}<>''").fetchall():
+                    try: fixed=iso_date(row["value"])
+                    except ValueError: continue
+                    if fixed!=row["value"]: db.execute(f"UPDATE OR IGNORE {table} SET {column}=? WHERE id=?",(fixed,row["id"]))
+            line_columns={row["name"] for row in db.execute("PRAGMA table_info(journal_lines)")}
+            for column in ("line_currency","amount","amount_lbp","amount_usd","rate_lbp","rate_usd","due_date","reference"):
+                if column not in line_columns: db.execute(f"ALTER TABLE journal_lines ADD COLUMN {column} TEXT")
+            for column in ("department_id","project_id"):
+                if column not in line_columns: db.execute(f"ALTER TABLE journal_lines ADD COLUMN {column} INTEGER")
+            for table in ("invoices","expenses"):
+                columns={row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                for column in ("department_id","project_id"):
+                    if column not in columns: db.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
+            payment_columns={row["name"] for row in db.execute("PRAGMA table_info(payments)")}
+            for column,definition in (("payment_number","TEXT"),("payment_method","TEXT"),("department_id","INTEGER"),("project_id","INTEGER"),
+                                      ("bank_commission","TEXT NOT NULL DEFAULT '0'"),("commission_account","TEXT"),
+                                      ("exchange_difference","TEXT NOT NULL DEFAULT '0'"),("exchange_account","TEXT")):
+                if column not in payment_columns: db.execute(f"ALTER TABLE payments ADD COLUMN {column} {definition}")
+            expense_cols={row["name"] for row in db.execute("PRAGMA table_info(expenses)")}
+            if "expense_number" not in expense_cols: db.execute("ALTER TABLE expenses ADD COLUMN expense_number TEXT")
+            invoice_cols={row["name"] for row in db.execute("PRAGMA table_info(invoices)")}
+            if "linked_invoice_id" not in invoice_cols: db.execute("ALTER TABLE invoices ADD COLUMN linked_invoice_id INTEGER")
+            if "vat_treatment" not in invoice_cols: db.execute("ALTER TABLE invoices ADD COLUMN vat_treatment TEXT NOT NULL DEFAULT 'standard'")
+            if "vat_use" not in invoice_cols: db.execute("ALTER TABLE invoices ADD COLUMN vat_use TEXT NOT NULL DEFAULT 'mixed'")
+            expense_cols={row["name"] for row in db.execute("PRAGMA table_info(expenses)")}
+            if "vat_use" not in expense_cols: db.execute("ALTER TABLE expenses ADD COLUMN vat_use TEXT NOT NULL DEFAULT 'mixed'")
+            return_cols={row["name"] for row in db.execute("PRAGMA table_info(vat_returns)")}
+            if "refund_requested_lbp" not in return_cols: db.execute("ALTER TABLE vat_returns ADD COLUMN refund_requested_lbp TEXT NOT NULL DEFAULT '0'")
+            if "deduction_ratio" not in return_cols: db.execute("ALTER TABLE vat_returns ADD COLUMN deduction_ratio TEXT")
+            entry_columns={row["name"] for row in db.execute("PRAGMA table_info(journal_entries)")}
+            if "voucher_type" not in entry_columns: db.execute("ALTER TABLE journal_entries ADD COLUMN voucher_type TEXT NOT NULL DEFAULT '01'")
+            import inventory
+            inventory.migrate(db)
+            import chart_extra
+            chart_extra.ensure_accounts(db)
+            item_cols={row["name"] for row in db.execute("PRAGMA table_info(invoice_items)")}
+            for column,definition in (("unit","TEXT"),("discount_percent","TEXT"),("discount_amount","TEXT"),("gross_amount","TEXT")):
+                if column not in item_cols: db.execute(f"ALTER TABLE invoice_items ADD COLUMN {column} {definition}")
+            inv_cols={row["name"] for row in db.execute("PRAGMA table_info(invoices)")}
+            for column,definition in (("doc_subtype","TEXT NOT NULL DEFAULT 'invoice'"),("invoice_discount_percent","TEXT"),("invoice_discount_amount","TEXT"),("gross_before_discount","TEXT"),("notes","TEXT")):
+                if column not in inv_cols: db.execute(f"ALTER TABLE invoices ADD COLUMN {column} {definition}")
+            db.execute("""CREATE TABLE IF NOT EXISTS payment_allocations (id INTEGER PRIMARY KEY, payment_id INTEGER NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+                invoice_id INTEGER NOT NULL, amount TEXT NOT NULL, created_at TEXT NOT NULL)""")
+            # new default posting accounts for payroll (only where the old defaults were never changed)
+            for row in db.execute("SELECT id,employee_account_map,manager_account_map FROM payroll_settings").fetchall():
+                for column,new_map in (("employee_account_map",chart_extra.PAYROLL_MAP),("manager_account_map",chart_extra.MANAGER_PAYROLL_MAP)):
+                    try: current=json.loads(row[column] or "{}")
+                    except ValueError: current={}
+                    if not current or current==chart_extra.OLD_PAYROLL_MAP: db.execute(f"UPDATE payroll_settings SET {column}=? WHERE id=?",(json.dumps(new_map),row["id"]))
+            db.execute("""UPDATE payroll_settings SET payroll_tax_account='4411',nssf_payable_account='4431',salary_account='6311'
+                WHERE payroll_tax_account='443100001' AND nssf_payable_account='447100001'""")
+            user_columns={row["name"] for row in db.execute("PRAGMA table_info(users)")}
+            if "expires_at" not in user_columns: db.execute("ALTER TABLE users ADD COLUMN expires_at TEXT")
+            if "permissions" not in user_columns: db.execute("ALTER TABLE users ADD COLUMN permissions TEXT NOT NULL DEFAULT '{}'")
+            if "created_at" not in user_columns: db.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+            invoice_columns={row["name"] for row in db.execute("PRAGMA table_info(invoices)")}
+            if "vat_recoverable" not in invoice_columns: db.execute("ALTER TABLE invoices ADD COLUMN vat_recoverable INTEGER NOT NULL DEFAULT 1")
+            expense_columns={row["name"] for row in db.execute("PRAGMA table_info(expenses)")}
+            if "vat_recoverable" not in expense_columns: db.execute("ALTER TABLE expenses ADD COLUMN vat_recoverable INTEGER NOT NULL DEFAULT 1")
             db.execute("INSERT OR IGNORE INTO users(username,password_hash,role) VALUES(?,?,?)", ("admin", hash_password(admin_password), "admin"))
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('base_currency','USD')")
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('backup_interval_hours','24')")
@@ -305,7 +452,7 @@ class Database:
             db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code='6011'))",
                        (EXPENSE_ACCOUNT_9,"General Expenses - 9 Digit","expense"))
             db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code='4426.6'))",
-                       (VAT_ACCOUNT_9,"VAT Receivable - 9 Digit","asset"))
+                       ("442660000","VAT Receivable - 9 Digit","asset"))
             db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type,parent_id) VALUES(?,?,?,(SELECT id FROM accounts WHERE code='6011'))",
                        (EXPENSE_NO_VAT_ACCOUNT_9,"Expenses without VAT - 9 Digit","expense"))
             db.execute("UPDATE invoices SET expense_account=? WHERE expense_account='6011'",(EXPENSE_ACCOUNT_9,))
@@ -321,23 +468,80 @@ class Database:
                     (account_number,f"Supplier - {supplier['name']}","liability"))
                 db.execute("UPDATE invoices SET supplier_account=? WHERE party_id=? AND kind='purchase' AND supplier_account='4011'",
                     (account_number,supplier["id"]))
+        self._auto_lebanese_payroll_rules()
+
+    def _auto_lebanese_payroll_rules(self):
+        """If the Tax & NSSF settings were never filled in (all NSSF ceilings are 0), load the official Lebanese
+        periods automatically so the 2024-2026 ceilings apply month by month without any manual step."""
+        with self.connect() as db:
+            rows=db.execute("SELECT employee_ceiling,medical_ceiling,family_ceiling FROM payroll_settings").fetchall()
+            done=db.execute("SELECT value FROM app_settings WHERE key='lebanese_payroll_rules_auto'").fetchone()
+        unconfigured=not rows or all(Decimal(str(r["employee_ceiling"] or 0))==0 and Decimal(str(r["medical_ceiling"] or 0))==0 and Decimal(str(r["family_ceiling"] or 0))==0 for r in rows)
+        if done or not unconfigured: return
+        self.apply_lebanese_payroll_rules(None)
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO app_settings(key,value) VALUES('lebanese_payroll_rules_auto',?)",(utcnow(),))
+
+    @staticmethod
+    def month_end(value):
+        """Payroll is monthly: the rules of a month are those in force on its last day."""
+        day=datetime.strptime(iso_date(value),"%Y-%m-%d")
+        import calendar
+        return day.replace(day=calendar.monthrange(day.year,day.month)[1]).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def user_is_expired(user, today=None):
+        expires=user["expires_at"] if "expires_at" in user.keys() else None
+        if not expires: return False
+        today=today or datetime.now().strftime("%Y-%m-%d")
+        return str(expires) < today
 
     def login(self, username, password):
         with self.connect() as db:
             user = db.execute("SELECT * FROM users WHERE username=? AND active=1", (username,)).fetchone()
             if not user or not verify_password(password, user["password_hash"]):
                 return None
+            if self.user_is_expired(user):
+                raise PermissionError(f"This account expired on {display_date(user['expires_at'])}. Ask the administrator to renew it.")
             token = secrets.token_urlsafe(32)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=SESSION_HOURS)
+            stale = [row["token"] for row in db.execute("SELECT token,created_at FROM sessions")
+                     if (parse_ts(row["created_at"]) or datetime.now(timezone.utc)) < cutoff]
+            for stale_token in stale:
+                db.execute("DELETE FROM sessions WHERE token=?", (stale_token,))
             db.execute("INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)", (token, user["id"], utcnow()))
-            return {"token": token, "username": user["username"], "role": user["role"], "language": user["language"]}
+            return {"token": token, "username": user["username"], "role": user["role"], "language": user["language"],
+                "expires_at": user["expires_at"], "permissions": parse_permissions(user["permissions"]) if user["role"]!="admin" else {m:True for m in PERMISSION_MODULES}}
 
     def user_for_token(self, token):
+        if not token: return None
         with self.connect() as db:
-            return db.execute("SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND u.active=1", (token,)).fetchone()
+            row=db.execute("""SELECT u.*, s.created_at AS session_created_at FROM sessions s JOIN users u ON u.id=s.user_id
+                WHERE s.token=? AND u.active=1""", (token,)).fetchone()
+        if not row: return None
+        created=parse_ts(row["session_created_at"])
+        if created is None or (datetime.now(timezone.utc)-created) > timedelta(hours=SESSION_HOURS): return None
+        if self.user_is_expired(row): return None
+        return row
+
+    def user_can(self, user, module):
+        if not user: return False
+        if user["role"]=="admin": return True
+        return parse_permissions(user["permissions"] if "permissions" in user.keys() else "{}").get(module, True)
 
     def list_users(self):
+        today=datetime.now().date()
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT id,username,role,language,active FROM users ORDER BY username")]
+            rows=[dict(row) for row in db.execute("SELECT id,username,role,language,active,expires_at,permissions FROM users ORDER BY username")]
+        for row in rows:
+            row["permissions"]=parse_permissions(row.get("permissions"))
+            if row.get("expires_at"):
+                row["days_remaining"]=(datetime.strptime(row["expires_at"],"%Y-%m-%d").date()-today).days
+                row["status"]="expired" if row["days_remaining"]<0 else "active"
+            else:
+                row["days_remaining"]=None; row["status"]="active"
+            if not row["active"]: row["status"]="disabled"
+        return rows
 
     def save_user(self, item, acting_user_id):
         username=str(item.get("username") or "").strip(); role=str(item.get("role") or "viewer").strip()
@@ -345,21 +549,33 @@ class Database:
         active=1 if item.get("active",True) else 0; user_id=item.get("id")
         if not username or role not in ("admin","accountant","viewer") or language not in ("en","ar","fr"):
             raise ValueError("Enter a valid username, role, and language")
+        if password and len(password)<6: raise ValueError("Password must contain at least 6 characters")
+        permissions=json.dumps(parse_permissions(item.get("permissions")))
+        one_year=(datetime.now()+timedelta(days=USER_VALIDITY_DAYS)).strftime("%Y-%m-%d")
         with self.connect() as db:
+            existing=db.execute("SELECT * FROM users WHERE id=?",(int(user_id),)).fetchone() if user_id else None
+            if user_id and not existing: raise ValueError("User was not found")
+            clash=db.execute("SELECT id FROM users WHERE lower(username)=lower(?) AND id<>?",(username,int(user_id or 0))).fetchone()
+            if clash: raise ValueError(f"Username '{username}' is already used")
+            if item.get("renew"): expires=one_year
+            elif "expires_at" in item: expires=iso_date(item["expires_at"],"Expiry date") if str(item.get("expires_at") or "").strip() else None
+            elif existing: expires=existing["expires_at"]
+            else: expires=None if role=="admin" else one_year
+            if existing and existing["role"]=="admin" and (role!="admin" or not active):
+                admins=db.execute("SELECT COUNT(*) n FROM users WHERE role='admin' AND active=1 AND id<>?",(int(user_id),)).fetchone()["n"]
+                if not admins: raise ValueError("At least one active administrator must remain")
             if user_id:
-                if password:
-                    db.execute("UPDATE users SET username=?,role=?,language=?,active=?,password_hash=? WHERE id=?",
-                        (username,role,language,active,hash_password(password),int(user_id)))
-                else:
-                    db.execute("UPDATE users SET username=?,role=?,language=?,active=? WHERE id=?",
-                        (username,role,language,active,int(user_id)))
+                db.execute("UPDATE users SET username=?,role=?,language=?,active=?,expires_at=?,permissions=? WHERE id=?",
+                    (username,role,language,active,expires,permissions,int(user_id)))
+                if password: db.execute("UPDATE users SET password_hash=? WHERE id=?",(hash_password(password),int(user_id)))
+                if not active or password: db.execute("DELETE FROM sessions WHERE user_id=?",(int(user_id),))
                 saved_id=int(user_id)
             else:
                 if not password: raise ValueError("Password is required for a new user")
-                saved_id=db.execute("INSERT INTO users(username,password_hash,role,language,active) VALUES(?,?,?,?,?)",
-                    (username,hash_password(password),role,language,active)).lastrowid
+                saved_id=db.execute("INSERT INTO users(username,password_hash,role,language,active,expires_at,permissions,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (username,hash_password(password),role,language,active,expires,permissions,utcnow())).lastrowid
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
-                (acting_user_id,"save","user",saved_id,json.dumps({"username":username,"role":role,"active":active}),utcnow()))
+                (acting_user_id,"save","user",saved_id,json.dumps({"username":username,"role":role,"active":active,"expires_at":expires,"permissions":json.loads(permissions)}),utcnow()))
         return next(row for row in self.list_users() if row["id"]==saved_id)
 
     def _account_id(self, db, code):
@@ -425,7 +641,7 @@ class Database:
             raise ValueError(f"Fiscal year {year} is closed; entries cannot be added or changed")
 
     def next_invoice_number(self, kind="sale", invoice_date=None):
-        prefix = "SAL" if str(kind).lower() in ("sale","sales") else "PUR"
+        prefix = {"sale":"SAL","sales":"SAL","credit_note":"CN","debit_note":"DN","supplier_credit_note":"SCN","supplier_debit_note":"SDN"}.get(str(kind).lower(),"PUR")
         year = str(invoice_date or datetime.now().year)
         if "-" in year:
             year = year[-4:] if year[:4].isdigit() is False else year[:4]
@@ -441,24 +657,66 @@ class Database:
             except (TypeError, ValueError): pass
         return f"{prefix}-{year}-{sequence:06d}"
 
-    def backup(self):
+    backup_folder = None   # set by CompanyManager: backups/<company>/<year>
+    backup_label = None    # "<company>_<year>"
+
+    def _backups_dir(self):
+        return Path(self.backup_folder) if self.backup_folder else Path(self.path).parent / "backups"
+
+    def backup(self, kind="backup"):
+        """Consistent copy of this company-year file (SQLite backup API, safe while others are writing).
+        Stored in backups/<company>/<year>/<company>_<year>_<date>_<time>.db"""
         source = Path(self.path)
         if not source.exists(): return None
-        folder = source.parent / "backups"; folder.mkdir(parents=True, exist_ok=True)
-        target = folder / f"saber_accounting_{datetime.now():%Y%m%d_%H%M%S_%f}.db"
-        shutil.copy2(source, target)
+        folder = self._backups_dir(); folder.mkdir(parents=True, exist_ok=True)
+        label = self.backup_label or "saber_accounting"
+        target = folder / f"{label}_{datetime.now():%Y-%m-%d_%H%M%S}{'_' + kind if kind != 'backup' else ''}.db"
+        if target.exists(): target = folder / f"{target.stem}_{datetime.now():%f}.db"
+        with self._lock:
+            source_connection = sqlite3.connect(str(source)); target_connection = sqlite3.connect(str(target))
+            try: source_connection.backup(target_connection)
+            finally: target_connection.close(); source_connection.close()
         return str(target)
 
+    @staticmethod
+    def _validate_backup_file(path):
+        try:
+            connection=sqlite3.connect(Path(path).resolve().as_uri()+"?mode=ro",uri=True)
+            try:
+                if connection.execute("PRAGMA integrity_check").fetchone()[0]!="ok": raise ValueError("Backup file is damaged")
+                tables={row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            finally: connection.close()
+        except sqlite3.DatabaseError as exc: raise ValueError("Selected file is not a valid Saber Accounting backup") from exc
+        if not {"accounts","journal_entries","invoices"}.issubset(tables): raise ValueError("Selected file is not a Saber Accounting backup")
+
+    def _backup_files(self):
+        folders=[self._backups_dir()]
+        legacy=Path(self.path).parent/"backups"
+        if legacy.resolve()!=folders[0].resolve(): folders.append(legacy)
+        files={}
+        for index,folder in enumerate(folders):
+            if not folder.exists(): continue
+            for path in folder.glob("*.db" if index==0 else "saber_accounting_*.db"): files.setdefault(path.name,path)
+        return files
+
     def list_backups(self):
-        folder=Path(self.path).parent/"backups"
-        if not folder.exists(): return []
-        return [{"name":path.name,"size":path.stat().st_size,"modified":datetime.fromtimestamp(path.stat().st_mtime).isoformat()}
-                for path in sorted(folder.glob("saber_accounting_*.db"),reverse=True)]
+        files=self._backup_files()
+        return [{"name":path.name,"size":path.stat().st_size,"modified":datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+                 "kind":"safety" if "_safety" in path.stem else "older version" if path.name.startswith("saber_accounting_") and self.backup_label else "backup"}
+                for path in sorted(files.values(),key=lambda p:p.stat().st_mtime,reverse=True)]
+
+    def backup_path(self, name):
+        path=self._backup_files().get(Path(str(name)).name)
+        if not path or not path.exists(): raise ValueError("Backup was not found")
+        return path
 
     def restore_backup(self, name, user_id):
-        folder=(Path(self.path).parent/"backups").resolve(); source=(folder/Path(str(name)).name).resolve()
-        if source.parent!=folder or not source.exists(): raise ValueError("Backup was not found")
-        safety=self.backup(); shutil.copy2(source,self.path)
+        source=self.backup_path(name).resolve()
+        self._validate_backup_file(source)
+        safety=self.backup("safety")
+        source_connection=sqlite3.connect(str(source)); target_connection=sqlite3.connect(self.path)
+        try: source_connection.backup(target_connection)
+        finally: target_connection.close(); source_connection.close()
         with self.connect() as db:
             db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",
                 (user_id,"restore","database",json.dumps({"backup":source.name,"safety_backup":safety}),utcnow()))
@@ -468,7 +726,7 @@ class Database:
         with self.connect() as db: return {row["key"]:row["value"] for row in db.execute("SELECT key,value FROM app_settings")}
 
     def save_settings(self, values, user_id):
-        allowed={"base_currency","backup_interval_hours","company_name","company_address","company_phone","company_mof","company_email","company_website","company_logo"}
+        allowed={"base_currency","backup_interval_hours","company_name","company_address","company_phone","company_mof","company_nssf","company_email","company_website","company_logo","company_vat_registered","company_vat_date"}
         if str(values.get("base_currency") or "USD") not in ("USD","EUR","LBP","AED"): raise ValueError("Invalid base currency")
         try: hours=int(values.get("backup_interval_hours",24))
         except Exception as exc: raise ValueError("Backup interval must be a number") from exc
@@ -491,10 +749,21 @@ class Database:
             return path
         return None
 
-    def clear_invoices(self, user_id):
-        backup_path = self.backup()
+    def clear_invoices(self, user_id, make_backup=True):
         with self.connect() as db:
-            entry_ids = [r["id"] for r in db.execute("SELECT id FROM journal_entries WHERE source_type IN ('invoice','journal_voucher')")]
+            if db.execute("SELECT 1 FROM payment_allocations LIMIT 1").fetchone():
+                raise ValueError("Invoice replacement is blocked while payments are allocated to existing invoices")
+            if db.execute("SELECT 1 FROM stock_documents WHERE invoice_id IS NOT NULL LIMIT 1").fetchone():
+                raise ValueError("Invoice replacement is blocked while stock documents are linked to invoices")
+            if db.execute("SELECT 1 FROM vat_returns LIMIT 1").fetchone():
+                raise ValueError("Invoice replacement is blocked after a quarterly VAT return has been saved")
+            if db.execute("SELECT 1 FROM fiscal_years WHERE status='closed' LIMIT 1").fetchone():
+                raise ValueError("Invoice replacement is blocked while a fiscal year is closed")
+            if db.execute("SELECT 1 FROM invoices WHERE CAST(COALESCE(amount_paid,'0') AS REAL)>0 LIMIT 1").fetchone():
+                raise ValueError("Invoice replacement is blocked while existing invoices have payments recorded")
+        backup_path = self.backup("safety") if make_backup else None
+        with self.connect() as db:
+            entry_ids = [r["id"] for r in db.execute("SELECT id FROM journal_entries WHERE source_type IN ('invoice','invoice_reversal','vat_reclass') AND (source_type!='vat_reclass' OR entry_number LIKE 'VATND-INV-%')")]
             if entry_ids:
                 marks = ",".join("?" for _ in entry_ids)
                 db.execute(f"DELETE FROM journal_lines WHERE entry_id IN ({marks})", entry_ids)
@@ -526,10 +795,16 @@ class Database:
                 supplier_account=party_account
             elif kind=="sale" and not item.get("supplier_account") and item.get("source_file")=="Sales Invoice":
                 supplier_account=party_account
-            vat_account = str(item.get("vat_account") or (DEFAULT_LEBANESE_ACCOUNTS["vat_payable"] if kind=="sale" else VAT_ACCOUNT_9)).strip()
+            import chart_extra
+            default_vat = chart_extra.SALES_VAT if kind=="sale" else chart_extra.EXPORT_VAT if item.get("vat_use")=="export" else \
+                chart_extra.EXPENSE_VAT if self._entry_type(item)=="expenses" else chart_extra.PURCHASE_VAT
+            vat_account = str(item.get("vat_account") or default_vat).strip()
             expense_account = str(item.get("expense_account") or (DEFAULT_LEBANESE_ACCOUNTS["sales"] if kind=="sale" else EXPENSE_ACCOUNT_9)).strip()
             expense_no_vat_account=str(item.get("expense_no_vat_account") or EXPENSE_NO_VAT_ACCOUNT_9).strip()
-            supplier_side=self._side(item.get("supplier_side"),"C"); vat_side=self._side(item.get("vat_side"),"D"); expense_side=self._side(item.get("expense_side"),"D"); expense_no_vat_side=self._side(item.get("expense_no_vat_side"),"D")
+            supplier_side=self._side(item.get("supplier_side"),"D" if kind=="sale" else "C")
+            vat_side=self._side(item.get("vat_side"),"C" if kind=="sale" else "D")
+            expense_side=self._side(item.get("expense_side"),"C" if kind=="sale" else "D")
+            expense_no_vat_side=self._side(item.get("expense_no_vat_side"),"D")
             account_definitions = [
                 (supplier_account, "Client Account" if kind=="sale" else "Supplier Account", "asset" if kind=="sale" else "liability"),
                 (vat_account, "Output VAT Account" if kind=="sale" else "VAT Account", "liability" if kind=="sale" else "asset"),
@@ -562,11 +837,25 @@ class Database:
             entry = db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,branch_id,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (entry_number, item.get("invoice_date"), f"{entry_type.replace('_',' ').title()} {item['invoice_number']}", "invoice", invoice_id, item.get("currency", "USD"),branch_id, user_id, utcnow()))
             if kind == "sale":
-                lines = [(supplier_account, total, 0), (expense_account, 0, subtotal), (vat_account, 0, vat)]
+                lines = [self._line_for_side(supplier_account,total,self._side(item.get("supplier_side"),"D")),
+                         self._line_for_side(expense_account,subtotal,self._side(item.get("expense_side"),"C")),
+                         self._line_for_side(vat_account,vat,self._side(item.get("vat_side"),"C"))]
             else:
-                lines = [self._line_for_side(expense_account,deductible,expense_side),self._line_for_side(expense_no_vat_account,non_deductible,expense_no_vat_side),self._line_for_side(vat_account,vat,vat_side),self._line_for_side(supplier_account,total,supplier_side)]
+                splits=item.get("expense_splits")
+                if splits:
+                    expense_lines=[]
+                    for acct,amt in splits:
+                        code=str(acct).strip(); value=Decimal(str(amt))
+                        if not value: continue
+                        db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(code,"Expense Account","expense"))
+                        expense_lines.append(self._line_for_side(code,value,expense_side))
+                    lines = expense_lines+[self._line_for_side(expense_no_vat_account,non_deductible,expense_no_vat_side),self._line_for_side(vat_account,vat,vat_side),self._line_for_side(supplier_account,total,supplier_side)]
+                else:
+                    lines = [self._line_for_side(expense_account,deductible,expense_side),self._line_for_side(expense_no_vat_account,non_deductible,expense_no_vat_side),self._line_for_side(vat_account,vat,vat_side),self._line_for_side(supplier_account,total,supplier_side)]
             lines=[line for line in lines if Decimal(str(line[1])) or Decimal(str(line[2]))]
             difference = sum(x[1] for x in lines) - sum(x[2] for x in lines)
+            if kind=="sale" and any(item.get(key) for key in ("supplier_side","expense_side","vat_side")) and difference:
+                raise ValueError("Sales posting accounts are unbalanced. Check their Debit/Credit selections.")
             if difference > 0:
                 lines.append((DEFAULT_LEBANESE_ACCOUNTS["import_variance"], 0, difference))
             elif difference < 0:
@@ -576,6 +865,12 @@ class Database:
             debit_total = sum(x[1] for x in lines); credit_total = sum(x[2] for x in lines)
             if debit_total != credit_total:
                 raise ValueError(f"Unbalanced journal entry for invoice {item['invoice_number']}")
+            treatment,use=self._vat_classification(item,kind)
+            db.execute("UPDATE invoices SET vat_treatment=?,vat_use=? WHERE id=?",(treatment,use,invoice_id))
+            department_id,project_id=self._dimension_ids(db,item)
+            if department_id or project_id:
+                db.execute("UPDATE invoices SET department_id=?,project_id=? WHERE id=?",(department_id,project_id,invoice_id))
+                db.execute("UPDATE journal_lines SET department_id=?,project_id=? WHERE entry_id=?",(department_id,project_id,entry.lastrowid))
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)", (user_id, "import", "invoice", invoice_id, json.dumps({"source_file": item.get("source_file"), "source_row": item.get("source_row")}), utcnow()))
             return invoice_id
 
@@ -584,7 +879,7 @@ class Database:
             raise ValueError("Add at least one invoice item")
         normalized = []
         deductible_total = Decimal("0"); non_deductible_total=Decimal("0")
-        vat_total = Decimal("0")
+        vat_total = Decimal("0"); expense_splits={}
         for index, line in enumerate(line_items, start=1):
             description = str(line.get("description") or "").strip()
             if not description:
@@ -608,9 +903,12 @@ class Database:
             if vat < 0:
                 raise ValueError(f"Item {index}: VAT cannot be negative")
             total = subtotal + vat
-            normalized.append((description, quantity, unit_price, subtotal,deductible,non_deductible,vat_rate,vat,total))
+            line_expense_account=str(line.get("expense_account") or "").split(" - ",1)[0].strip() or None
+            normalized.append((description, quantity, unit_price, subtotal,deductible,non_deductible,vat_rate,vat,total,str(line.get("item_code") or "").strip() or None))
             deductible_total+=deductible; non_deductible_total+=non_deductible
             vat_total += vat
+            if line_expense_account and deductible:
+                expense_splits[line_expense_account]=expense_splits.get(line_expense_account,Decimal("0"))+deductible
         invoice = dict(item)
         if not str(invoice.get("invoice_number") or "").strip():
             invoice["invoice_number"] = self.next_invoice_number(invoice.get("kind", "sale"), invoice.get("invoice_date"))
@@ -618,6 +916,14 @@ class Database:
         invoice["subtotal"] = float(deductible_total+non_deductible_total)
         invoice["vat"] = float(vat_total)
         invoice["total"] = float(deductible_total+non_deductible_total+vat_total)
+        # per-item cost-account routing: split the expense side by each line's own account, remainder on the invoice default
+        if expense_splits and self._entry_type(invoice)!="sales":
+            default_account=str(invoice.get("expense_account") or EXPENSE_ACCOUNT_9).strip()
+            routed=sum(expense_splits.values()); remainder=deductible_total-routed
+            splits=[(acct,amount) for acct,amount in expense_splits.items()]
+            if remainder>Decimal("0.005") or remainder<Decimal("-0.005"):
+                splits.append((default_account,remainder))
+            invoice["expense_splits"]=[(acct,str(amount)) for acct,amount in splits if amount]
         if self._entry_type(invoice)!="sales":
             raw_lines=[self._line_for_side(invoice.get("expense_account") or EXPENSE_ACCOUNT_9,deductible_total,self._side(invoice.get("expense_side"),"D")),
                 self._line_for_side(invoice.get("expense_no_vat_account") or EXPENSE_NO_VAT_ACCOUNT_9,non_deductible_total,self._side(invoice.get("expense_no_vat_side"),"D")),
@@ -631,13 +937,19 @@ class Database:
         with self.connect() as db:
             if str(invoice.get("source_file") or "")=="Journal Voucher":
                 db.execute("UPDATE journal_entries SET source_type='journal_voucher' WHERE source_type='invoice' AND source_id=?",(invoice_id,))
-            db.executemany("""INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,subtotal,deductible_subtotal,non_deductible_subtotal,vat_rate,vat,total)
-                VALUES(?,?,?,?,?,?,?,?,?,?)""", [
-                (invoice_id,description,str(quantity),str(unit_price),str(subtotal),str(deductible),str(non_deductible),str(vat_rate),str(vat),str(total))
-                for description,quantity,unit_price,subtotal,deductible,non_deductible,vat_rate,vat,total in normalized
+            db.executemany("""INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,subtotal,deductible_subtotal,non_deductible_subtotal,vat_rate,vat,total,item_code)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", [
+                (invoice_id,description,str(quantity),str(unit_price),str(subtotal),str(deductible),str(non_deductible),str(vat_rate),str(vat),str(total),item_code)
+                for description,quantity,unit_price,subtotal,deductible,non_deductible,vat_rate,vat,total,item_code in normalized
             ])
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id, "manual_entry", "invoice", invoice_id, json.dumps({"items": len(normalized)}), utcnow()))
+        self._store_invoice_format(invoice_id, item, line_items)
+        if any(line.get("item_code") for line in line_items):
+            import inventory
+            try: inventory.issue_for_invoice(self, invoice_id, line_items, user_id)
+            except Exception:
+                self.delete_invoice(invoice_id, user_id); raise
         return invoice_id
 
     def delete_invoice(self,invoice_id,user_id):
@@ -647,6 +959,9 @@ class Database:
             self._assert_period_open(invoice["invoice_date"])
             details=dict(invoice)
             db.execute("DELETE FROM journal_entries WHERE source_type IN ('invoice','journal_voucher') AND source_id=?",(int(invoice_id),))
+            db.execute("DELETE FROM journal_entries WHERE source_type='vat_reclass' AND entry_number=?",(f"VATND-INV-{int(invoice_id)}",))
+            import inventory
+            inventory.remove_invoice_documents(db,invoice_id)
             db.execute("DELETE FROM invoices WHERE id=?",(int(invoice_id),))
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"delete","invoice",int(invoice_id),json.dumps({"invoice_number":details.get("invoice_number"),"party_id":details.get("party_id"),"total":details.get("total")}),utcnow()))
@@ -686,10 +1001,15 @@ class Database:
         if not date or not description or currency not in ("USD","EUR","LBP","AED"): raise ValueError("Enter voucher date, description, and currency")
         if not isinstance(lines,list) or len(lines)<2: raise ValueError("Journal Voucher requires at least two lines")
         normalized=[]; total_debit=Decimal("0"); total_credit=Decimal("0")
+        voucher_type=str(item.get("voucher_type") or "01").strip()[:2] or "01"
         for index,line in enumerate(lines,1):
-            code=str(line.get("account_code") or "").split(" - ",1)[0].strip(); debit=Decimal(str(line.get("debit") or 0)); credit=Decimal(str(line.get("credit") or 0))
+            code=str(line.get("account_code") or "").split(" - ",1)[0].strip(); extra=self._voucher_line_amounts(line,currency,date,index)
+            if extra: debit,credit=extra["debit"],extra["credit"]
+            else:
+                try: debit=Decimal(str(line.get("debit") or 0)); credit=Decimal(str(line.get("credit") or 0))
+                except Exception as exc: raise ValueError(f"Line {index}: Debit and Credit must be numbers") from exc
             if not code or min(debit,credit)<0 or (debit>0 and credit>0) or (debit==0 and credit==0): raise ValueError(f"Line {index}: choose an account and enter either Debit or Credit")
-            normalized.append((code,str(line.get("description") or "").strip(),debit,credit)); total_debit+=debit; total_credit+=credit
+            normalized.append((code,str(line.get("description") or "").strip(),debit,credit,extra,line)); total_debit+=debit; total_credit+=credit
         if abs(total_debit-total_credit)>=Decimal("0.005"): raise ValueError(f"Journal Voucher is unbalanced. Debit {total_debit}; Credit {total_credit}; Remaining {abs(total_debit-total_credit)}")
         with self.connect() as db:
             branch_id=self._branch_id(db,item)
@@ -699,7 +1019,7 @@ class Database:
                 self._assert_period_open(existing["entry_date"]); voucher_number=str(item.get("entry_number") or existing["entry_number"]).strip()
                 duplicate=db.execute("SELECT 1 FROM journal_entries WHERE entry_number=? AND id<>?",(voucher_number,int(entry_id))).fetchone()
                 if duplicate: raise ValueError("Voucher number already exists")
-                db.execute("UPDATE journal_entries SET entry_number=?,entry_date=?,description=?,currency=?,branch_id=? WHERE id=?",(voucher_number,date,description,currency,branch_id,int(entry_id)))
+                db.execute("UPDATE journal_entries SET entry_number=?,entry_date=?,description=?,currency=?,branch_id=?,voucher_type=? WHERE id=?",(voucher_number,date,description,currency,branch_id,voucher_type,int(entry_id)))
                 db.execute("DELETE FROM journal_lines WHERE entry_id=?",(int(entry_id),)); saved_id=int(entry_id); action="update"
             else:
                 voucher_number=str(item.get("entry_number") or "").strip()
@@ -707,23 +1027,73 @@ class Database:
                     year=self._date_year(date); prefix=f"JV-{year}-"; row=db.execute("SELECT entry_number FROM journal_entries WHERE entry_number LIKE ? ORDER BY entry_number DESC LIMIT 1",(prefix+"%",)).fetchone()
                     sequence=int(row["entry_number"].rsplit("-",1)[-1])+1 if row else 1; voucher_number=f"{prefix}{sequence:06d}"
                 if db.execute("SELECT 1 FROM journal_entries WHERE entry_number=?",(voucher_number,)).fetchone(): raise ValueError("Voucher number already exists")
-                saved_id=db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,currency,branch_id,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",(voucher_number,date,description,"journal_voucher",currency,branch_id,user_id,utcnow())).lastrowid; action="create"
-            for code,line_description,debit,credit in normalized:
+                saved_id=db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,currency,branch_id,created_by,created_at,voucher_type) VALUES(?,?,?,?,?,?,?,?,?)",(voucher_number,date,description,"journal_voucher",currency,branch_id,user_id,utcnow(),voucher_type)).lastrowid; action="create"
+            for code,line_description,debit,credit,extra,raw_line in normalized:
+                department_id,project_id=self._dimension_ids(db,{"department":raw_line.get("department") or item.get("department"),"project":raw_line.get("project") or item.get("project"),
+                    "department_id":raw_line.get("department_id") or item.get("department_id"),"project_id":raw_line.get("project_id") or item.get("project_id")})
                 account=db.execute("SELECT id FROM accounts WHERE code=?",(code,)).fetchone()
                 if not account: raise ValueError(f"Account {code} was not found")
-                db.execute("INSERT INTO journal_lines(entry_id,account_id,description,debit,credit) VALUES(?,?,?,?,?)",(saved_id,account["id"],line_description,str(debit),str(credit)))
+                party=db.execute("SELECT id FROM parties WHERE account_number=?",(code,)).fetchone()
+                db.execute("""INSERT INTO journal_lines(entry_id,account_id,party_id,description,debit,credit,line_currency,amount,amount_lbp,amount_usd,rate_lbp,rate_usd,due_date,reference)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(saved_id,account["id"],party["id"] if party else None,line_description,str(debit),str(credit),
+                    *( (extra["line_currency"],str(extra["amount"]),str(extra["amount_lbp"]),str(extra["amount_usd"]),str(extra["rate_lbp"]),str(extra["rate_usd"]),extra["due_date"],extra["reference"]) if extra else (None,)*8 )))
+                if department_id or project_id:
+                    db.execute("UPDATE journal_lines SET department_id=?,project_id=? WHERE id=last_insert_rowid()",(department_id,project_id))
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",(user_id,action,"journal_voucher",saved_id,json.dumps({"entry_number":voucher_number,"debit":str(total_debit),"credit":str(total_credit)}),utcnow()))
         return self.journal_voucher_detail(saved_id)
+
+    def suggested_rates(self,currency,date=None):
+        """BRAINS convention: LBP rate = LBP for 1 unit; USD rate = USD for 1 unit (for LBP lines: LBP per 1 USD)."""
+        currency=str(currency or "USD").upper(); day=date or datetime.now().strftime("%d-%m-%Y")
+        usd_lbp=self._converted_amount(Decimal("1"),"USD","LBP",day)
+        if currency=="LBP": return {"currency":"LBP","rate_lbp":Decimal("1"),"rate_usd":usd_lbp}
+        if currency=="USD": return {"currency":"USD","rate_lbp":usd_lbp,"rate_usd":Decimal("1")}
+        return {"currency":currency,"rate_lbp":self._converted_amount(Decimal("1"),currency,"LBP",day),"rate_usd":self._converted_amount(Decimal("1"),currency,"USD",day)}
+
+    def _voucher_line_amounts(self,line,voucher_currency,date,index):
+        """Lines entered like BRAINS: currency, D/C, amount in the account currency and LBP / USD rates."""
+        if line.get("amount") in (None,"") or not line.get("side"): return None
+        side=str(line.get("side")).strip().upper()[:1]
+        if side not in ("D","C"): raise ValueError(f"Line {index}: D/C must be D or C")
+        currency=str(line.get("line_currency") or voucher_currency).upper()
+        if currency not in ("USD","EUR","LBP","AED"): raise ValueError(f"Line {index}: invalid currency")
+        try:
+            amount=Decimal(str(line.get("amount")).replace(",","")); suggested=self.suggested_rates(currency,date)
+            rate_lbp=Decimal(str(line.get("rate_lbp") or suggested["rate_lbp"]).replace(",","")); rate_usd=Decimal(str(line.get("rate_usd") or suggested["rate_usd"]).replace(",",""))
+        except Exception as exc: raise ValueError(f"Line {index}: amount and rates must be numbers") from exc
+        if amount<=0 or rate_lbp<=0 or rate_usd<=0: raise ValueError(f"Line {index}: amount and rates must be above zero")
+        amount_lbp=(amount*rate_lbp).quantize(Decimal("0.01")); amount_usd=((amount/rate_usd) if currency=="LBP" else amount*rate_usd).quantize(Decimal("0.001"))
+        if currency==voucher_currency: value=amount
+        elif voucher_currency=="USD": value=amount_usd
+        elif voucher_currency=="LBP": value=amount_lbp
+        else: raise ValueError(f"Line {index}: a {voucher_currency} voucher can only contain {voucher_currency} lines. Use a USD or LBP voucher to mix currencies")
+        value=value.quantize(Decimal("0.01"))
+        due=str(line.get("due_date") or "").strip()
+        return {"debit":value if side=="D" else Decimal("0"),"credit":value if side=="C" else Decimal("0"),"line_currency":currency,"amount":amount,
+                "amount_lbp":amount_lbp,"amount_usd":amount_usd,"rate_lbp":rate_lbp,"rate_usd":rate_usd,"due_date":display_date(due) if due else None,
+                "reference":str(line.get("reference") or "").strip() or None}
 
     def journal_voucher_detail(self,entry_id):
         with self.connect() as db:
             entry=db.execute("SELECT * FROM journal_entries WHERE id=? AND source_type='journal_voucher'",(int(entry_id),)).fetchone()
             if not entry: raise KeyError(entry_id)
             lines=[dict(row) for row in db.execute("""SELECT a.code account_code,a.name_en account_name,COALESCE(j.description,'') description,
-                CAST(j.debit AS REAL) debit,CAST(j.credit AS REAL) credit FROM journal_lines j JOIN accounts a ON a.id=j.account_id WHERE j.entry_id=? ORDER BY j.id""",(int(entry_id),))]
+                CAST(j.debit AS REAL) debit,CAST(j.credit AS REAL) credit,j.line_currency,CAST(j.amount AS REAL) amount,CAST(j.amount_lbp AS REAL) amount_lbp,
+                CAST(j.amount_usd AS REAL) amount_usd,CAST(j.rate_lbp AS REAL) rate_lbp,CAST(j.rate_usd AS REAL) rate_usd,j.due_date,j.reference,
+                d.code department,pr.code project
+                FROM journal_lines j JOIN accounts a ON a.id=j.account_id LEFT JOIN departments d ON d.id=j.department_id LEFT JOIN projects pr ON pr.id=j.project_id
+                WHERE j.entry_id=? ORDER BY j.id""",(int(entry_id),))]
         return {"voucher":dict(entry),"lines":lines}
 
     def update_invoice(self, invoice_id, item, user_id):
+        result=self._update_invoice_base(invoice_id, item, user_id)
+        with self.connect() as db:
+            row=db.execute("SELECT kind,vat_recoverable,status FROM invoices WHERE id=?",(int(invoice_id),)).fetchone()
+        if row and row["kind"]=="purchase" and not row["vat_recoverable"] and row["status"]!="cancelled":
+            self.set_vat_recoverable("invoice",invoice_id,False,user_id)
+        return result
+
+    def _update_invoice_base(self, invoice_id, item, user_id):
         required = ("invoice_number", "invoice_date", "party_name", "kind", "currency")
         missing = [field for field in required if not str(item.get(field) or "").strip()]
         if missing:
@@ -746,7 +1116,8 @@ class Database:
         if total != subtotal + vat:
             raise ValueError("Total must equal Before VAT plus VAT")
         supplier_account = str(item.get("supplier_account") or DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"]).strip()
-        vat_account = str(item.get("vat_account") or VAT_ACCOUNT_9).strip()
+        import chart_extra
+        vat_account = str(item.get("vat_account") or (chart_extra.SALES_VAT if str(item.get("kind","")).lower() in ("sale","sales") else chart_extra.EXPENSE_VAT if self._entry_type(item)=="expenses" else chart_extra.PURCHASE_VAT)).strip()
         expense_account = str(item.get("expense_account") or EXPENSE_ACCOUNT_9).strip()
         expense_no_vat_account=str(item.get("expense_no_vat_account") or EXPENSE_NO_VAT_ACCOUNT_9).strip()
         supplier_side=self._side(item.get("supplier_side"),"C"); vat_side=self._side(item.get("vat_side"),"D"); expense_side=self._side(item.get("expense_side"),"D"); expense_no_vat_side=self._side(item.get("expense_no_vat_side"),"D")
@@ -890,6 +1261,9 @@ class Database:
                     (reverse.lastrowid, line["account_id"], line["party_id"], line["credit"], line["debit"]))
             db.execute("UPDATE invoices SET status='cancelled',cancelled_at=?,cancellation_reason=? WHERE id=?",
                        (utcnow(), reason, invoice_id))
+            db.execute("DELETE FROM journal_entries WHERE source_type='vat_reclass' AND entry_number=?",(f"VATND-INV-{int(invoice_id)}",))
+            import inventory
+            inventory.remove_invoice_documents(db,invoice_id)
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                        (user_id,"cancel","invoice",invoice_id,json.dumps({"reason":reason}),utcnow()))
         return self.get_invoice(invoice_id)
@@ -927,7 +1301,7 @@ class Database:
     def invoice_detail(self, invoice_id):
         invoice=self.get_invoice(invoice_id)
         with self.connect() as db:
-            items=[dict(row) for row in db.execute("SELECT description,quantity,unit_price,subtotal,vat_rate,vat,total FROM invoice_items WHERE invoice_id=? ORDER BY id",(invoice_id,))]
+            items=[dict(row) for row in db.execute("SELECT description,quantity,unit_price,subtotal,deductible_subtotal,non_deductible_subtotal,vat_rate,vat,total,item_code,unit,discount_percent,discount_amount,gross_amount FROM invoice_items WHERE invoice_id=? ORDER BY id",(invoice_id,))]
         return {"invoice":invoice,"items":items}
 
     def add_attachment(self, invoice_id, file_name, mime_type, content, user_id):
@@ -1084,7 +1458,8 @@ class Database:
                 WHERE l.entity='invoice' AND l.entity_id=? ORDER BY l.id DESC""", (invoice_id,))]
 
     def profit_and_loss(self, from_date=None, to_date=None, currency=None):
-        conditions = ["a.type IN ('income','expense')"]
+        # The year-end closing brings 6 & 7 to zero; the P&L must show the year before closing.
+        conditions = ["a.type IN ('income','expense')", "NOT (e.source_type='year_close' OR (e.voucher_type='05' AND e.description LIKE 'CLOSING 6&7 - %'))"]
         parameters = []
         normalized_date = """CASE WHEN e.entry_date GLOB '??-??-????'
             THEN substr(e.entry_date,7,4)||'-'||substr(e.entry_date,4,2)||'-'||substr(e.entry_date,1,2)
@@ -1102,61 +1477,18 @@ class Database:
         return rows
 
     def close_fiscal_year(self, year, user_id):
-        year = int(year)
-        start, end = f"{year}-01-01", f"{year}-12-31"
-        with self.connect() as db:
-            existing = db.execute("SELECT * FROM fiscal_years WHERE year=?", (year,)).fetchone()
-            if existing and existing["status"] == "closed":
-                raise ValueError(f"Fiscal year {year} is already closed")
-            pnl_rows = self.profit_and_loss(start, end)
-            by_currency = {}
-            for row in pnl_rows:
-                balance = Decimal(str(row["debit"] or 0)) - Decimal(str(row["credit"] or 0))
-                if balance:
-                    by_currency.setdefault(row["currency"], []).append((row["code"], balance))
-            results = {}
-            for currency, balances in by_currency.items():
-                entry = db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
-                    VALUES(?,?,?,?,?,?,?,?)""", (f"CLOSE-{year}-{currency}", end, f"Fiscal year {year} closing",
-                    "year_close", year, currency, user_id, utcnow()))
-                close_difference = Decimal("0")
-                for code, balance in balances:
-                    debit = -balance if balance < 0 else Decimal("0")
-                    credit = balance if balance > 0 else Decimal("0")
-                    close_difference += debit - credit
-                    db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",
-                        (entry.lastrowid,self._account_id(db,code),str(debit),str(credit)))
-                if close_difference > 0:
-                    result_code, debit, credit = "121", Decimal("0"), close_difference
-                else:
-                    result_code, debit, credit = "125", -close_difference, Decimal("0")
-                db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",
-                    (entry.lastrowid,self._account_id(db,result_code),str(debit),str(credit)))
-                results[currency] = float(credit - debit)
-            db.execute("""INSERT INTO fiscal_years(year,status,opened_at,closed_at,closed_by,details)
-                VALUES(?,'closed',?,?,?,?) ON CONFLICT(year) DO UPDATE SET status='closed',closed_at=excluded.closed_at,
-                closed_by=excluded.closed_by,details=excluded.details""",
-                (year,f"{year}-01-01T00:00:00",utcnow(),user_id,json.dumps({"net_results":results})))
-            db.execute("INSERT OR IGNORE INTO fiscal_years(year,status,opened_at) VALUES(?,'open',?)", (year+1,utcnow()))
-            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
-                (user_id,"close","fiscal_year",year,json.dumps({"next_year":year+1,"net_results":results}),utcnow()))
-        return {"closed_year":year,"opened_year":year+1,"net_results":results}
+        """Close classes 6 & 7 with a 'CLOSING 6&7' Journal Voucher (type 05) per currency."""
+        import year_end
+        return year_end.close_year(self, year, user_id)
 
     def list_fiscal_years(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute("SELECT * FROM fiscal_years ORDER BY year DESC")]
 
     def reopen_fiscal_year(self,year,user_id):
-        year=int(year)
-        with self.connect() as db:
-            row=db.execute("SELECT status FROM fiscal_years WHERE year=?",(year,)).fetchone()
-            closing_ids=[item["id"] for item in db.execute("SELECT id FROM journal_entries WHERE source_type='year_close' AND entry_number LIKE ?",(f"CLOSE-{year}-%",))]
-            for entry_id in closing_ids: db.execute("DELETE FROM journal_entries WHERE id=?",(entry_id,))
-            db.execute("""INSERT INTO fiscal_years(year,status,opened_at) VALUES(?,'open',?)
-                ON CONFLICT(year) DO UPDATE SET status='open',closed_at=NULL,closed_by=NULL,details=NULL""",(year,f"{year}-01-01T00:00:00"))
-            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
-                (user_id,"reopen","fiscal_year",year,json.dumps({"removed_closing_entries":len(closing_ids)}),utcnow()))
-        return {"year":year,"status":"open","removed_closing_entries":len(closing_ids)}
+        """Delete every closing of this year (old and new style) and open it again."""
+        import year_end
+        return year_end.reopen_year(self, year, user_id)
 
     def list_parties(self):
         with self.connect() as db:
@@ -1225,6 +1557,13 @@ class Database:
         if amount<=0: raise ValueError("Payment amount must be above zero")
         currency=str(item.get("currency") or "USD").upper()
         cash_account=str(item.get("cash_account") or "531").strip()
+        try: commission=Decimal(str(item.get("bank_commission") or 0))
+        except Exception as exc: raise ValueError("Invalid bank commission amount") from exc
+        if commission<0: raise ValueError("Bank commission cannot be negative")
+        try: exchange_diff=Decimal(str(item.get("exchange_difference") or 0))
+        except Exception as exc: raise ValueError("Invalid exchange difference amount") from exc
+        import chart_extra
+        commission_account=str(item.get("commission_account") or chart_extra.BANK_COMMISSION_ACCOUNT).split(" - ",1)[0].strip() or chart_extra.BANK_COMMISSION_ACCOUNT
         party_account=str(item.get("party_account") or (DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"] if kind=="customer_receipt" else DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"])).strip()
         party_id=int(item.get("party_id"))
         with self.connect() as db:
@@ -1233,28 +1572,48 @@ class Database:
             supplier_account=self._ensure_party_account(db,party)
             if kind=="supplier_payment" and party_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_payable"] and supplier_account:
                 party_account=supplier_account
+            if kind=="customer_receipt" and party_account==DEFAULT_LEBANESE_ACCOUNTS["accounts_receivable"] and supplier_account:
+                party_account=supplier_account
+            number=str(item.get("payment_number") or "").strip() or self._next_payment_number(db,kind,date)
+            if db.execute("SELECT 1 FROM payments WHERE payment_number=?",(number,)).fetchone(): raise ValueError(f"Number {number} is already used")
+            department_id,project_id=self._dimension_ids(db,item)
             db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(cash_account,"Cash / Bank Account","asset"))
             db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(party_account,"Party Control Account","asset" if kind=="customer_receipt" else "liability"))
-            result=db.execute("""INSERT INTO payments(kind,party_id,payment_date,currency,amount,cash_account,party_account,reference,description,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(kind,party_id,date,currency,str(amount),cash_account,party_account,
-                str(item.get("reference") or "").strip(),str(item.get("description") or "").strip(),user_id,utcnow()))
+            if commission: db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(commission_account,"Bank Commissions","expense"))
+            if exchange_diff:
+                db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(chart_extra.EXCHANGE_GAIN_ACCOUNT,"Gain on Exchange Difference","income"))
+                db.execute("INSERT OR IGNORE INTO accounts(code,name_en,type) VALUES(?,?,?)",(chart_extra.EXCHANGE_LOSS_ACCOUNT,"Loss on Exchange Difference","expense"))
+            result=db.execute("""INSERT INTO payments(kind,party_id,payment_date,currency,amount,cash_account,party_account,reference,description,bank_commission,commission_account,exchange_difference,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(kind,party_id,date,currency,str(amount),cash_account,party_account,
+                str(item.get("reference") or "").strip(),str(item.get("description") or "").strip(),str(commission),commission_account,str(exchange_diff),user_id,utcnow()))
             payment_id=result.lastrowid
+            db.execute("UPDATE payments SET payment_number=?,payment_method=?,department_id=?,project_id=? WHERE id=?",
+                (number,str(item.get("payment_method") or "Cash").strip(),department_id,project_id,payment_id))
             entry=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?)""",(f"PAY-{payment_id}",date,str(item.get("description") or kind.replace("_"," ")).strip(),"payment",payment_id,currency,user_id,utcnow()))
-            if kind=="customer_receipt": lines=[(cash_account,amount,0),(party_account,0,amount)]
-            else: lines=[(party_account,amount,0),(cash_account,0,amount)]
+                VALUES(?,?,?,?,?,?,?,?)""",(number,date,str(item.get("description") or (("Receipt from " if kind=="customer_receipt" else "Payment to ")+party["name"])).strip(),"payment",payment_id,currency,user_id,utcnow()))
+            party_settlement=amount+exchange_diff
+            if kind=="customer_receipt": lines=[(cash_account,amount-commission,Decimal("0")),(party_account,Decimal("0"),party_settlement)]
+            else: lines=[(party_account,party_settlement,Decimal("0")),(cash_account,Decimal("0"),amount+commission)]
+            if commission: lines.append((commission_account,commission,Decimal("0")))
+            balance=sum(d for _c,d,_cr in lines)-sum(cr for _c,_d,cr in lines)
+            if balance>0: lines.append((chart_extra.EXCHANGE_GAIN_ACCOUNT,Decimal("0"),balance))
+            elif balance<0: lines.append((chart_extra.EXCHANGE_LOSS_ACCOUNT,-balance,Decimal("0")))
+            lines=[(code,debit,credit) for code,debit,credit in lines if Decimal(str(debit)) or Decimal(str(credit))]
             for code,debit,credit in lines:
-                db.execute("INSERT INTO journal_lines(entry_id,account_id,party_id,debit,credit) VALUES(?,?,?,?,?)",
-                    (entry.lastrowid,self._account_id(db,code),party_id,str(debit),str(credit)))
+                db.execute("INSERT INTO journal_lines(entry_id,account_id,party_id,debit,credit,department_id,project_id) VALUES(?,?,?,?,?,?,?)",
+                    (entry.lastrowid,self._account_id(db,code),party_id,str(debit),str(credit),department_id,project_id))
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
-                (user_id,"create","payment",payment_id,json.dumps({"kind":kind,"amount":str(amount),"currency":currency}),utcnow()))
+                (user_id,"create","payment",payment_id,json.dumps({"kind":kind,"number":number,"amount":str(amount),"currency":currency}),utcnow()))
             return payment_id
 
     def list_payments(self):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("""SELECT x.id,x.kind,x.payment_date,p.name party_name,x.currency,
-                CAST(x.amount AS REAL) amount,x.cash_account,x.party_account,x.reference,x.description
-                FROM payments x JOIN parties p ON p.id=x.party_id ORDER BY x.id DESC""")]
+            return [dict(row) for row in db.execute("""SELECT x.id,x.kind,x.payment_number,x.payment_date,x.party_id,p.name party_name,x.currency,
+                CAST(x.amount AS REAL) amount,x.cash_account,x.party_account,x.reference,x.description,x.payment_method,
+                CAST(x.bank_commission AS REAL) bank_commission,x.commission_account,CAST(x.exchange_difference AS REAL) exchange_difference,
+                d.code department,pr.code project
+                FROM payments x JOIN parties p ON p.id=x.party_id LEFT JOIN departments d ON d.id=x.department_id LEFT JOIN projects pr ON pr.id=x.project_id
+                ORDER BY x.id DESC""")]
 
     def add_expense(self, item, user_id):
         date=str(item.get("expense_date") or "").strip(); self._assert_period_open(date)
@@ -1265,7 +1624,8 @@ class Database:
         if min(with_vat,without_vat,vat)<0 or total<=0: raise ValueError("Expense amounts must be valid")
         currency=str(item.get("currency") or "USD").upper(); expense_account=str(item.get("expense_account") or EXPENSE_ACCOUNT_9).strip()
         expense_without_vat_account=str(item.get("expense_without_vat_account") or EXPENSE_NO_VAT_ACCOUNT_9).strip()
-        vat_account=str(item.get("vat_account") or VAT_ACCOUNT_9).strip(); payment_account=str(item.get("payment_account") or "531").strip()
+        import chart_extra
+        vat_account=str(item.get("vat_account") or chart_extra.EXPENSE_VAT).strip(); payment_account=str(item.get("payment_account") or "531").strip()
         expense_side=self._side(item.get("expense_side"),"D"); expense_without_vat_side=self._side(item.get("expense_without_vat_side"),"D")
         vat_side=self._side(item.get("vat_side"),"D"); payment_side=self._side(item.get("payment_side"),"C")
         with self.connect() as db:
@@ -1274,8 +1634,10 @@ class Database:
             result=db.execute("""INSERT INTO expenses(expense_date,description,category,currency,subtotal,with_vat_subtotal,without_vat_subtotal,vat,total,expense_account,expense_without_vat_account,vat_account,payment_account,expense_side,expense_without_vat_side,vat_side,payment_side,reference,created_by,created_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(date,description,str(item.get("category") or "").strip(),currency,str(subtotal),str(with_vat),str(without_vat),str(vat),str(total),expense_account,expense_without_vat_account,vat_account,payment_account,expense_side,expense_without_vat_side,vat_side,payment_side,str(item.get("reference") or "").strip(),user_id,utcnow()))
             expense_id=result.lastrowid
+            number=str(item.get("expense_number") or "").strip() or self._next_number(db,"expenses","expense_number","EXP",date)
+            db.execute("UPDATE expenses SET expense_number=? WHERE id=?",(number,expense_id))
             entry=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?)""",(f"EXP-{expense_id}",date,description,"expense",expense_id,currency,user_id,utcnow()))
+                VALUES(?,?,?,?,?,?,?,?)""",(number if not db.execute("SELECT 1 FROM journal_entries WHERE entry_number=?",(number,)).fetchone() else f"EXP-{expense_id}",date,description,"expense",expense_id,currency,user_id,utcnow()))
             lines=[self._line_for_side(expense_account,with_vat,expense_side),self._line_for_side(expense_without_vat_account,without_vat,expense_without_vat_side),self._line_for_side(vat_account,vat,vat_side),self._line_for_side(payment_account,total,payment_side)]
             difference=sum(Decimal(str(line[1]))-Decimal(str(line[2])) for line in lines)
             if difference>0: lines.append((DEFAULT_LEBANESE_ACCOUNTS["import_variance"],Decimal("0"),difference))
@@ -1283,15 +1645,23 @@ class Database:
             for code,debit,credit in lines:
                 if Decimal(str(debit or credit)):
                     db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",(entry.lastrowid,self._account_id(db,code),str(debit),str(credit)))
+            db.execute("UPDATE expenses SET vat_use=? WHERE id=?",(self._vat_classification(item,"purchase")[1],expense_id))
+            department_id,project_id=self._dimension_ids(db,item)
+            if department_id or project_id:
+                db.execute("UPDATE expenses SET department_id=?,project_id=? WHERE id=?",(department_id,project_id,expense_id))
+                db.execute("UPDATE journal_lines SET department_id=?,project_id=? WHERE entry_id=?",(department_id,project_id,entry.lastrowid))
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"create","expense",expense_id,json.dumps({"total":str(total),"currency":currency}),utcnow()))
-            return expense_id
+        if str(item.get("vat_recoverable",True)).strip().lower() in ("0","false","no"):
+            self.set_vat_recoverable("expense",expense_id,False,user_id)
+        return expense_id
 
     def list_expenses(self):
         with self.connect() as db:
             return [dict(row) for row in db.execute("""SELECT id,expense_date,description,category,currency,
                 CAST(subtotal AS REAL) subtotal,CAST(with_vat_subtotal AS REAL) with_vat_subtotal,CAST(without_vat_subtotal AS REAL) without_vat_subtotal,CAST(vat AS REAL) vat,CAST(total AS REAL) total,
-                expense_account,expense_without_vat_account,vat_account,payment_account,expense_side,expense_without_vat_side,vat_side,payment_side,reference FROM expenses ORDER BY id DESC""")]
+                expense_account,expense_without_vat_account,vat_account,payment_account,expense_side,expense_without_vat_side,vat_side,payment_side,reference,vat_recoverable,
+                expense_number,department_id,project_id,vat_use,(SELECT COUNT(*) FROM expense_attachments a WHERE a.expense_id=expenses.id) attachment_count FROM expenses ORDER BY id DESC""")]
 
     def save_exchange_rate(self, item, user_id):
         date_from=str(item.get("date_from") or item.get("rate_date") or "").strip(); date_to=str(item.get("date_to") or date_from).strip()
@@ -1431,11 +1801,15 @@ class Database:
     def _converted_amount(self, amount, source, target, rate_date):
         amount=Decimal(str(amount or 0)); source=str(source or "USD").upper(); target=str(target or source).upper()
         if source==target: return amount
+        try: target_key=iso_date(rate_date).replace("-","")
+        except ValueError: target_key=datetime.now().strftime("%Y%m%d")
+        sortable="""CASE WHEN rate_date GLOB '??-??-????' THEN substr(rate_date,7,4)||substr(rate_date,4,2)||substr(rate_date,1,2)
+            ELSE replace(rate_date,'-','') END"""
         def find_rate(frm,to):
             with self.connect() as rate_db:
-                row=rate_db.execute("SELECT rate FROM exchange_rates WHERE from_currency=? AND to_currency=? AND rate_date<=? ORDER BY rate_date DESC,id DESC LIMIT 1",(frm,to,rate_date)).fetchone()
+                row=rate_db.execute(f"SELECT rate FROM exchange_rates WHERE from_currency=? AND to_currency=? AND {sortable}<=? ORDER BY {sortable} DESC,id DESC LIMIT 1",(frm,to,target_key)).fetchone()
                 if row: return Decimal(str(row["rate"]))
-                row=rate_db.execute("SELECT rate FROM exchange_rates WHERE from_currency=? AND to_currency=? AND rate_date<=? ORDER BY rate_date DESC,id DESC LIMIT 1",(to,frm,rate_date)).fetchone()
+                row=rate_db.execute(f"SELECT rate FROM exchange_rates WHERE from_currency=? AND to_currency=? AND {sortable}<=? ORDER BY {sortable} DESC,id DESC LIMIT 1",(to,frm,target_key)).fetchone()
                 return Decimal("1")/Decimal(str(row["rate"])) if row and Decimal(str(row["rate"])) else None
         direct=find_rate(source,target)
         if direct is not None: return amount*direct
@@ -1506,7 +1880,8 @@ class Database:
                 i.supplier_side,i.vat_side,i.expense_side,i.expense_no_vat_side,i.source_row,
                 i.due_date,i.payment_status,CAST(i.amount_paid AS REAL) amount_paid,i.payment_method,i.description,i.branch_id,COALESCE(b.name,'Head Office') branch_name,
                 CAST(i.total AS REAL)-CAST(i.amount_paid AS REAL) outstanding,i.cancelled_at,i.cancellation_reason,
-                (SELECT COUNT(*) FROM invoice_attachments x WHERE x.invoice_id=i.id) attachment_count
+                (SELECT COUNT(*) FROM invoice_attachments x WHERE x.invoice_id=i.id) attachment_count,i.vat_recoverable,i.department_id,i.project_id,i.vat_treatment,i.vat_use,
+                i.doc_subtype,i.invoice_discount_percent,i.invoice_discount_amount,i.notes
                 FROM invoices i LEFT JOIN parties p ON p.id=i.party_id LEFT JOIN branches b ON b.id=i.branch_id ORDER BY i.id DESC LIMIT ?""", (limit,))]
 
     def list_accounts(self):
@@ -1514,6 +1889,17 @@ class Database:
             return [dict(r) for r in db.execute("""SELECT a.code,a.name_en,a.name_ar,a.name_fr,a.type,
                 p.code parent_code FROM accounts a LEFT JOIN accounts p ON p.id=a.parent_id
                 ORDER BY CASE WHEN instr(a.code,'.')>0 THEN replace(a.code,'.','') ELSE a.code END""")]
+
+    def next_party_account_number(self,prefix):
+        """Next free 9-digit customer/supplier account under a 4-digit prefix (e.g. 4111 -> 411100007)."""
+        prefix="".join(character for character in str(prefix or "") if character.isdigit())
+        if len(prefix)!=4: raise ValueError("Enter the first 4 account digits")
+        with self.connect() as db:
+            used=[int(row["value"]) for row in db.execute("""SELECT account_number value FROM parties WHERE length(account_number)=9 AND account_number LIKE ?
+                UNION SELECT code FROM accounts WHERE length(code)=9 AND code GLOB '[0-9]*' AND code LIKE ?""",(prefix+"%",prefix+"%")) if str(row["value"]).isdigit()]
+        number=max(used,default=int(prefix+"00000"))+1
+        if number>int(prefix+"99999"): raise ValueError(f"No account numbers remain under prefix {prefix}")
+        return str(number).zfill(9)
 
     def next_account_number(self,prefix):
         prefix="".join(character for character in str(prefix or "") if character.isdigit())
@@ -1849,9 +2235,8 @@ class Database:
         return next(row for row in self.list_employees() if row["id"]==saved_id)
 
     def payroll_settings_for(self,period_date=None):
-        target=str(period_date or datetime.now().strftime("%Y-%m-%d"))
-        try: target=datetime.strptime(target,"%d-%m-%Y").strftime("%Y-%m-%d")
-        except ValueError: pass
+        try: target=iso_date(period_date) if period_date else datetime.now().strftime("%Y-%m-%d")
+        except ValueError: target=datetime.now().strftime("%Y-%m-%d")
         with self.connect() as db:
             row=db.execute("""SELECT * FROM payroll_settings WHERE date_from<=? AND (date_to IS NULL OR date_to='' OR date_to>=?)
                 ORDER BY date_from DESC LIMIT 1""",(target,target)).fetchone()
@@ -1867,12 +2252,44 @@ class Database:
 
     @staticmethod
     def default_payroll_account_map():
-        return {"salary":"621100001","transport":"621100003","overtime":"621100004","commission":"621100005","retro_salary":"621100006",
-            "schooling":"621100007","bonus":"621100008","thirteenth_month":"621100009","tax":"443100001","nssf":"447100001","payable":"421100001"}
+        import chart_extra
+        return dict(chart_extra.PAYROLL_MAP)
+
+    def list_payroll_settings(self):
+        with self.connect() as db:
+            rows=[dict(row) for row in db.execute("SELECT * FROM payroll_settings ORDER BY date_from")]
+        for row in rows:
+            row["tax_brackets"]=json.loads(row["tax_brackets"])
+            for key in ("employee_account_map","manager_account_map"):
+                try: row[key]=json.loads(row.get(key) or "{}")
+                except (TypeError,ValueError): row[key]={}
+        return rows
 
     def save_payroll_settings(self,item,user_id):
-        date_from=str(item.get("date_from") or "").strip()
-        if not date_from: raise ValueError("Settings date from is required")
+        if not str(item.get("date_from") or "").strip(): raise ValueError("Settings Date From is required")
+        date_from=iso_date(item.get("date_from"),"Date From")
+        date_to=iso_date(item.get("date_to"),"Date To") if str(item.get("date_to") or "").strip() else None
+        if date_to and date_to<date_from: raise ValueError("Date To cannot be before Date From")
+        if not isinstance(item.get("tax_brackets"),list) or not item.get("tax_brackets"): raise ValueError("At least one tax bracket is required")
+        for field in ("employee_nssf_rate","medical_rate","end_service_rate","family_rate"):
+            if item.get(field) not in (None,""):
+                try: rate=Decimal(str(item.get(field)))
+                except Exception as exc: raise ValueError(f"{field.replace('_',' ').title()} must be a number such as 0.03") from exc
+                if rate<0 or rate>=1: raise ValueError(f"{field.replace('_',' ').title()} must be a decimal rate between 0 and 1 (3% = 0.03)")
+        for field in ("employee_ceiling","medical_ceiling","family_ceiling","end_service_ceiling","single_allowance","spouse_allowance","child_allowance"):
+            if item.get(field) not in (None,""):
+                try: value=Decimal(str(item.get(field)).replace(",",""))
+                except Exception as exc: raise ValueError(f"{field.replace('_',' ').title()} must be a number") from exc
+                if value<0: raise ValueError(f"{field.replace('_',' ').title()} cannot be negative")
+                item[field]=str(value)
+        with self.connect() as db:
+            later=db.execute("""SELECT date_from FROM payroll_settings WHERE date_from>? ORDER BY date_from LIMIT 1""",(date_from,)).fetchone()
+            if later and (date_to is None or date_to>=later["date_from"]):
+                if date_to is None: date_to=(datetime.strptime(later["date_from"],"%Y-%m-%d")-timedelta(days=1)).strftime("%Y-%m-%d")
+                else: raise ValueError(f"This period overlaps the settings that start on {display_date(later['date_from'])}")
+            closing=(datetime.strptime(date_from,"%Y-%m-%d")-timedelta(days=1)).strftime("%Y-%m-%d")
+            db.execute("""UPDATE payroll_settings SET date_to=? WHERE date_from<? AND (date_to IS NULL OR date_to='' OR date_to>=?)""",(closing,date_from,date_from))
+        item=dict(item); item["date_from"]=date_from; item["date_to"]=date_to
         brackets=item.get("tax_brackets")
         if not isinstance(brackets,list) or not brackets: raise ValueError("At least one tax bracket is required")
         fields=("single_allowance","spouse_allowance","child_allowance","employee_nssf_rate","medical_rate","end_service_rate","family_rate",
@@ -1892,7 +2309,25 @@ class Database:
             for key in ("employee_account_map","manager_account_map"):
                 mapping={**self.default_payroll_account_map(),**(item.get(key) or {})}
                 db.execute(f"UPDATE payroll_settings SET {key}=? WHERE date_from=?",(json.dumps(mapping),date_from))
+            for key in ("transport_daily_exempt","default_transport_days","schooling_annual_exempt","schooling_max_children","tax_rounding","minimum_wage","max_children_deduction","family_allowance_spouse","family_allowance_child","family_allowance_cap","family_allowance_max_children"):
+                if item.get(key) not in (None,""):
+                    try: value=str(Decimal(str(item[key]).replace(",","")))
+                    except Exception as exc: raise ValueError(f"{key.replace('_',' ').title()} must be a number") from exc
+                    db.execute(f"UPDATE payroll_settings SET {key}=? WHERE date_from=?",(value,date_from))
         return self.payroll_settings_for(date_from)
+
+    def apply_lebanese_payroll_rules(self,user_id):
+        """Replace the effective-dated payroll settings with the official Lebanese periods (2024 onward), keeping the posting accounts."""
+        import lebanese_payroll
+        current=self.payroll_settings_for(None)
+        maps={k:current.get(k) for k in ("employee_account_map","manager_account_map")}
+        accounts={k:current.get(k) for k in ("salary_account","salary_payable_account","payroll_tax_account","nssf_payable_account") if current.get(k)}
+        with self.connect() as db: db.execute("DELETE FROM payroll_settings")
+        for period in lebanese_payroll.official_periods():
+            self.save_payroll_settings({**period,**accounts,**maps},user_id)
+        with self.connect() as db:
+            db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",(user_id,"apply","payroll_rules",json.dumps({"periods":len(lebanese_payroll.PERIODS)}),utcnow()))
+        return self.list_payroll_settings()
 
     @staticmethod
     def _progressive_tax(annual_taxable,brackets):
@@ -1906,65 +2341,147 @@ class Database:
         return tax
 
     def calculate_payroll(self,item):
+        """Monthly payroll under the Lebanese rules effective on the payroll date.
+
+        - Recurring pay (salary, overtime, commission and the taxable part of transport / schooling) is taxed
+          on the annualised basis: tax(12 x monthly - family deductions) / 12.
+        - Bonus and 13th salary are one-off income: tax(annual regular + one-off) - tax(annual regular).
+        - Retroactive salary is taxed as if paid in its own months (Retro From / To), and its NSSF uses the
+          ceiling of each of those months.
+        - Transport is exempt up to the daily amount x days worked; schooling up to the annual limit.
+        - NSSF: employee and employer shares on the monthly ceilings of the period; end of service has no ceiling.
+        - Tax is rounded up to the rounding amount (LBP 10,000 from 25-11-2024) and converted to the salary currency."""
         employee_id=int(item.get("employee_id") or 0); period=str(item.get("period_date") or "").strip()
         if not employee_id or not period: raise ValueError("Select an employee and payroll period")
+        period=iso_date(period,"Payroll period")
         with self.connect() as db: employee=db.execute("SELECT * FROM employees WHERE id=?",(employee_id,)).fetchone()
         if not employee: raise ValueError("Employee was not found")
-        settings=self.payroll_settings_for(period)
-        money={name:Decimal(str(item.get(name) if item.get(name) not in (None,"") else (employee["base_salary"] if name=="salary" else 0)))
-            for name in ("salary","transport","overtime","commission","retro_salary","schooling","bonus","thirteenth_month")}
-        gross=sum(money.values(),Decimal("0")); currency=employee["currency"]
-        gross_lbp=self._converted_amount(gross,currency,"LBP",period); annual_lbp=gross_lbp*12
-        allowance=Decimal(settings.get("single_allowance","0"))
-        if employee["marital_status"] in ("married","spouse") and not int(employee["spouse_works"] or 0): allowance+=Decimal(settings.get("spouse_allowance","0"))
-        allowance+=Decimal(settings.get("child_allowance","0"))*int(employee["children"] or 0)
-        taxable_lbp=max(Decimal("0"),annual_lbp-allowance)
-        income_tax_lbp=(self._progressive_tax(taxable_lbp,settings.get("tax_brackets",[]))/12).quantize(Decimal("0.01"))
-        income_tax=self._converted_amount(income_tax_lbp,"LBP",currency,period).quantize(Decimal("0.01"))
-        taxable_monthly=self._converted_amount(taxable_lbp/12,"LBP",currency,period).quantize(Decimal("0.01"))
+        rules_date=self.month_end(period); settings=self.payroll_settings_for(rules_date); D=Decimal
+        def setting(name,default="0"):
+            try: return D(str(settings.get(name) if settings.get(name) not in (None,"") else default))
+            except Exception: return D(default)
+        money={}
+        for name in ("salary","transport","overtime","commission","retro_salary","schooling","bonus","thirteenth_month"):
+            raw=item.get(name) if item.get(name) not in (None,"") else (employee["base_salary"] if name=="salary" else 0)
+            try: money[name]=D(str(raw).replace(",",""))
+            except Exception as exc: raise ValueError(f"{name.replace('_',' ').title()} must be a number") from exc
+            if money[name]<0: raise ValueError(f"{name.replace('_',' ').title()} cannot be negative")
+        currency=employee["currency"]; brackets=settings.get("tax_brackets",[]); notes=[]
+        to_lbp=lambda value,day=period: self._converted_amount(value,currency,"LBP",day)
+        from_lbp=lambda value,day=period: self._converted_amount(value,"LBP",currency,day)
+        try: days=int(D(str(item.get("transport_days") if item.get("transport_days") not in (None,"") else setting("default_transport_days","26"))))
+        except Exception as exc: raise ValueError("Transport days must be a whole number") from exc
+        if days<0 or days>31: raise ValueError("Transport days must be between 0 and 31")
+        exempt_transport_lbp=min(to_lbp(money["transport"]),setting("transport_daily_exempt")*days)
+        children=int(employee["children"] or 0)
+        schooling_limit=setting("schooling_annual_exempt")/12 if min(children,int(setting("schooling_max_children","3")))>0 else D("0")
+        exempt_schooling_lbp=min(to_lbp(money["schooling"]),schooling_limit)
+        taxable_transport_lbp=to_lbp(money["transport"])-exempt_transport_lbp; taxable_schooling_lbp=to_lbp(money["schooling"])-exempt_schooling_lbp
+        if taxable_transport_lbp>0: notes.append(f"Transport above the exempt {int(setting('transport_daily_exempt')):,} LBP x {days} days is taxed")
+        if taxable_schooling_lbp>0: notes.append("Schooling above the exempt annual limit is taxed")
+        allowance=setting("single_allowance")
+        if employee["marital_status"] in ("married","spouse") and not int(employee["spouse_works"] or 0): allowance+=setting("spouse_allowance")
+        allowance+=setting("child_allowance")*min(children,int(setting("max_children_deduction","5")))
+        if children>int(setting("max_children_deduction","5")): notes.append(f"Family deduction limited to {int(setting('max_children_deduction','5'))} children")
+        regular_lbp=to_lbp(money["salary"]+money["overtime"]+money["commission"])+taxable_transport_lbp+taxable_schooling_lbp
+        tax=lambda annual: self._progressive_tax(max(D("0"),annual-allowance),brackets)
+        regular_tax=tax(regular_lbp*12)/12
+        one_off_lbp=to_lbp(money["bonus"]+money["thirteenth_month"])
+        one_off_tax=tax(regular_lbp*12+one_off_lbp)-tax(regular_lbp*12)
+        retro_tax=D("0"); retro_months=[]
+        if money["retro_salary"]:
+            start=iso_date(item.get("retro_from") or period,"Retro From"); end=iso_date(item.get("retro_to") or period,"Retro To")
+            if end<start: raise ValueError("Retro To cannot be before Retro From")
+            y,m=int(start[:4]),int(start[5:7])
+            while (y,m)<=(int(end[:4]),int(end[5:7])):
+                retro_months.append(self.month_end(f"{y}-{m:02d}-01")); m+=1
+                if m>12: y,m=y+1,1
+            share=money["retro_salary"]/len(retro_months)
+            for month in retro_months:
+                month_settings=self.payroll_settings_for(month); month_brackets=month_settings.get("tax_brackets",brackets)
+                monthly=lambda annual: self._progressive_tax(max(D("0"),annual-allowance),month_brackets)/12
+                retro_tax+=monthly((regular_lbp+to_lbp(share,month))*12)-monthly(regular_lbp*12)
+        rounding=setting("tax_rounding")
+        def rounded(value):
+            value=max(D("0"),value)
+            if rounding>0 and value>0: return ((value/rounding).to_integral_value(rounding="ROUND_CEILING"))*rounding
+            return value.quantize(D("0.01"))
+        income_tax_lbp=rounded(regular_tax+one_off_tax+retro_tax)
+        retro_tax_lbp=min(income_tax_lbp,max(D("0"),retro_tax).quantize(D("0.01")))
+        income_tax=from_lbp(income_tax_lbp).quantize(D("0.01")); retro_tax_value=from_lbp(retro_tax_lbp).quantize(D("0.01"))
+        taxable_lbp=max(D("0"),regular_lbp*12-allowance)/12+one_off_lbp
+        # NSSF: salary, overtime, commission, bonus and 13th this month; retroactive salary in its own months.
+        base_lbp=to_lbp(money["salary"]+money["overtime"]+money["commission"]+money["bonus"]+money["thirteenth_month"])
+        def contribution(ceiling_name,rate_name,base,month_settings):
+            limit=D(str(month_settings.get(ceiling_name) or 0)); capped=min(base,limit) if limit>0 else base
+            return capped*D(str(month_settings.get(rate_name) or 0))
+        totals={name:contribution(ceiling,rate,base_lbp,settings) for name,ceiling,rate in (("employee","employee_ceiling","employee_nssf_rate"),("medical","medical_ceiling","medical_rate"),
+                ("family","family_ceiling","family_rate"),("end_service","end_service_ceiling","end_service_rate"))}
+        if money["retro_salary"]:
+            share=money["retro_salary"]/len(retro_months)
+            for month in retro_months:
+                month_settings=self.payroll_settings_for(month); regular_month=to_lbp(money["salary"]+money["overtime"]+money["commission"],month); extra=to_lbp(share,month)
+                for name,ceiling,rate in (("employee","employee_ceiling","employee_nssf_rate"),("medical","medical_ceiling","medical_rate"),("family","family_ceiling","family_rate"),("end_service","end_service_ceiling","end_service_rate")):
+                    totals[name]+=contribution(ceiling,rate,regular_month+extra,month_settings)-contribution(ceiling,rate,regular_month,month_settings)
+        nssf={name:(value.quantize(D("0.01")),from_lbp(value).quantize(D("0.01"))) for name,value in totals.items()}
+        # NSSF family allowances paid with the salary on behalf of the NSSF (not taxable, offset against NSSF dues).
+        allowance_lbp=D("0")
+        if setting("family_allowance_cap")>0 or setting("family_allowance_child")>0:
+            if employee["marital_status"] in ("married","spouse") and not int(employee["spouse_works"] or 0): allowance_lbp+=setting("family_allowance_spouse")
+            allowance_lbp+=setting("family_allowance_child")*min(children,int(setting("family_allowance_max_children","5")))
+            if setting("family_allowance_cap")>0: allowance_lbp=min(allowance_lbp,setting("family_allowance_cap"))
+        family_allowance=from_lbp(allowance_lbp).quantize(D("0.01"))
+        minimum=setting("minimum_wage")
+        if minimum>0 and to_lbp(money["salary"])<minimum: notes.append(f"Salary is below the minimum wage of {int(minimum):,} LBP for this period")
+        if not str(employee["nssf_number"] or "").strip(): notes.append("NSSF number missing in the employee file")
+        if not str(employee["mof_number"] or "").strip(): notes.append("MOF (tax) number missing in the employee file")
+        gross=sum(money.values(),D("0"))
+        net=(gross-income_tax-nssf["employee"][1]+family_allowance).quantize(D("0.01"))
         salary_base=money["salary"]+money["overtime"]+money["commission"]+money["retro_salary"]+money["bonus"]+money["thirteenth_month"]
-        salary_base_lbp=self._converted_amount(salary_base,currency,"LBP",period)
-        def contribution(ceiling,rate):
-            limit=Decimal(str(settings.get(ceiling,"0") or 0)); base=min(salary_base_lbp,limit) if limit>0 else salary_base_lbp
-            amount_lbp=(base*Decimal(settings.get(rate,"0"))).quantize(Decimal("0.01"))
-            return self._converted_amount(amount_lbp,"LBP",currency,period).quantize(Decimal("0.01")),amount_lbp
-        employee_nssf,employee_nssf_lbp=contribution("employee_ceiling","employee_nssf_rate")
-        medical,medical_lbp=contribution("medical_ceiling","medical_rate")
-        family,family_lbp=contribution("family_ceiling","family_rate")
-        end_service,end_service_lbp=contribution("end_service_ceiling","end_service_rate")
-        net=(gross-income_tax-employee_nssf).quantize(Decimal("0.01"))
-        return {**{k:float(v) for k,v in money.items()},"gross_salary":float(gross),"taxable_salary":float(taxable_monthly),"income_tax":float(income_tax),"income_tax_lbp":float(income_tax_lbp),
-            "nssf_base":float(salary_base),"employee_nssf":float(employee_nssf),"employee_nssf_lbp":float(employee_nssf_lbp),"employer_medical":float(medical),
-            "employer_end_service":float(end_service),"employer_family":float(family),"net_salary":float(net),"currency":currency}
+        return {**{k:float(v) for k,v in money.items()},"gross_salary":float(gross),"taxable_salary":float(from_lbp(taxable_lbp).quantize(D("0.01"))),
+            "income_tax":float(income_tax),"income_tax_lbp":float(income_tax_lbp),"nssf_base":float(salary_base),"employee_nssf":float(nssf["employee"][1]),
+            "employee_nssf_lbp":float(nssf["employee"][0]),"employer_medical":float(nssf["medical"][1]),"employer_end_service":float(nssf["end_service"][1]),
+            "employer_family":float(nssf["family"][1]),"net_salary":float(net),"currency":currency,"retro_tax":float(retro_tax_value),"retro_tax_lbp":float(retro_tax_lbp),
+            "regular_tax":float(from_lbp(rounded(regular_tax)).quantize(D("0.01"))),"one_off_tax":float(from_lbp(max(D("0"),one_off_tax)).quantize(D("0.01"))),
+            "transport_days":days,"exempt_transport":float(from_lbp(exempt_transport_lbp).quantize(D("0.01"))),"exempt_schooling":float(from_lbp(exempt_schooling_lbp).quantize(D("0.01"))),
+            "family_allowance":float(family_allowance),"compliance_notes":notes,"period_date":period,
+            "settings_period":{"date_from":settings.get("date_from"),"date_to":settings.get("date_to")},"rules_date":rules_date,
+            "ceilings":{"medical":float(D(str(settings.get("medical_ceiling") or 0))),"family":float(D(str(settings.get("family_ceiling") or 0)))}}
 
     def list_payroll(self,period_from=None,period_to=None):
         conditions=[]; values=[]
-        if period_from: conditions.append("p.period_date>=?"); values.append(period_from)
-        if period_to: conditions.append("p.period_date<=?"); values.append(period_to)
+        if period_from: conditions.append("p.period_date>=?"); values.append(iso_date(period_from))
+        if period_to: conditions.append("p.period_date<=?"); values.append(iso_date(period_to))
         where=" WHERE "+" AND ".join(conditions) if conditions else ""
         with self.connect() as db:
             return [dict(row) for row in db.execute(f"""SELECT p.*,e.employee_number,e.full_name FROM payroll_records p
                 JOIN employees e ON e.id=p.employee_id{where} ORDER BY p.period_date DESC,p.payroll_number DESC""",values)]
 
     def save_payroll(self,item,user_id):
-        calc=self.calculate_payroll(item); employee_id=int(item["employee_id"]); period=str(item["period_date"])
+        calc=self.calculate_payroll(item); employee_id=int(item["employee_id"]); period=calc["period_date"]
+        self._assert_period_open(period)
+        retro_from=iso_date(item["retro_from"],"Retro From") if item.get("retro_from") else None
+        retro_to=iso_date(item["retro_to"],"Retro To") if item.get("retro_to") else None
+        if calc["retro_salary"] and (not retro_from or not retro_to): raise ValueError("Enter Retro From and Retro To dates for the retroactive salary")
+        if retro_from and retro_to and retro_to<retro_from: raise ValueError("Retro To cannot be before Retro From")
         number=str(item.get("payroll_number") or "").strip()
         with self.connect() as db:
             if not number:
                 prefix=f"PAY-{period[:7].replace('-','')}-"; row=db.execute("SELECT payroll_number FROM payroll_records WHERE payroll_number LIKE ? ORDER BY payroll_number DESC LIMIT 1",(prefix+"%",)).fetchone()
                 number=f"{prefix}{(int(row['payroll_number'].rsplit('-',1)[-1])+1 if row else 1):06d}"
             fields=("salary","transport","overtime","commission","retro_salary","schooling","bonus","thirteenth_month","gross_salary","taxable_salary","income_tax","income_tax_lbp",
-                "nssf_base","employee_nssf","employer_medical","employer_end_service","employer_family","net_salary")
-            values=[str(calc[field]) for field in fields]
+                "nssf_base","employee_nssf","employer_medical","employer_end_service","employer_family","net_salary","retro_tax",
+                "transport_days","exempt_transport","exempt_schooling","family_allowance","regular_tax","one_off_tax","compliance_notes")
+            values=[json.dumps(calc[field]) if field=="compliance_notes" else str(calc[field]) for field in fields]
             existing=db.execute("SELECT id,status FROM payroll_records WHERE employee_id=? AND period_date=?",(employee_id,period)).fetchone()
             if existing and existing["status"]=="posted": raise ValueError("Posted payroll cannot be changed")
             if existing:
                 db.execute(f"UPDATE payroll_records SET payroll_number=?,currency=?,{','.join(field+'=?' for field in fields)},retro_from=?,retro_to=?,reference=?,notes=? WHERE id=?",
-                    (number,calc["currency"],*values,item.get("retro_from") or None,item.get("retro_to") or None,item.get("reference"),item.get("notes"),existing["id"])); saved_id=existing["id"]
+                    (number,calc["currency"],*values,retro_from,retro_to,item.get("reference"),item.get("notes"),existing["id"])); saved_id=existing["id"]
             else:
                 columns=",".join(fields); marks=",".join("?" for _ in fields)
                 saved_id=db.execute(f"INSERT INTO payroll_records(payroll_number,employee_id,period_date,currency,{columns},retro_from,retro_to,reference,notes,created_by,created_at) VALUES(?,?,?,?,{marks},?,?,?,?,?,?)",
-                    (number,employee_id,period,calc["currency"],*values,item.get("retro_from") or None,item.get("retro_to") or None,item.get("reference"),item.get("notes"),user_id,utcnow())).lastrowid
+                    (number,employee_id,period,calc["currency"],*values,retro_from,retro_to,item.get("reference"),item.get("notes"),user_id,utcnow())).lastrowid
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"save","payroll",saved_id,json.dumps({"payroll_number":number}),utcnow()))
         return next(row for row in self.list_payroll() if row["id"]==saved_id)
@@ -1995,9 +2512,10 @@ class Database:
             employer_nssf=sum((Decimal(record[name]) for name in ("employer_medical","employer_end_service","employer_family")),Decimal("0"))
             number=f'PAYJV-{record["payroll_number"]}'
             entry_id=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,branch_id,created_by,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?)""",(number,record["period_date"],f'Payroll - {record["full_name"]}',"payroll",record["id"],record["currency"],record["branch_id"],user_id,utcnow())).lastrowid
+                VALUES(?,?,?,?,?,?,?,?,?)""",(number,display_date(record["period_date"]),f'Payroll - {record["full_name"]}',"payroll",record["id"],record["currency"],record["branch_id"],user_id,utcnow())).lastrowid
             lines=[(mapping[key],Decimal(record[key]),Decimal("0")) for key in component_names]
-            lines+=((employer_expense,employer_nssf,Decimal("0")),(payable_account,Decimal("0"),net),(tax_account,Decimal("0"),tax),(nssf_account,Decimal("0"),employee_nssf+employer_nssf))
+            family_allowance=Decimal(str(record["family_allowance"] or 0)) if "family_allowance" in record.keys() else Decimal("0")
+            lines+=((employer_expense,employer_nssf,Decimal("0")),(payable_account,Decimal("0"),net),(tax_account,Decimal("0"),tax),(nssf_account,family_allowance,employee_nssf+employer_nssf))
             for code,debit,credit in lines:
                 if not debit and not credit: continue
                 db.execute("INSERT INTO journal_lines(entry_id,account_id,description,debit,credit) VALUES(?,?,?,?,?)",
@@ -2006,3 +2524,496 @@ class Database:
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"post","payroll",record["id"],json.dumps({"payroll_number":record["payroll_number"],"journal_entry":number}),utcnow()))
         return next(row for row in self.list_payroll() if row["id"]==int(payroll_id))
+
+    # ---------------------------------------------------------------- legal documents
+    def legal_document_alerts(self, days=30, today=None):
+        """Expired and soon-to-expire legal documents of customers and suppliers."""
+        today=datetime.strptime(iso_date(today),"%Y-%m-%d").date() if today else datetime.now().date()
+        with self.connect() as db:
+            rows=[dict(row) for row in db.execute("""SELECT d.id,d.party_id,p.name party_name,p.kind party_kind,d.document_type,
+                d.issue_date,d.expiry_date,d.file_name,d.notes FROM party_documents d JOIN parties p ON p.id=d.party_id
+                WHERE d.expiry_date IS NOT NULL AND d.expiry_date<>''""")]
+        alerts=[]
+        for row in rows:
+            try: expiry=datetime.strptime(iso_date(row["expiry_date"]),"%Y-%m-%d").date()
+            except ValueError: continue
+            remaining=(expiry-today).days
+            if remaining>int(days): continue
+            row["days_remaining"]=remaining; row["expiry_date"]=expiry.strftime("%d-%m-%Y")
+            row["status"]="expired" if remaining<0 else "expires today" if remaining==0 else "expiring soon"
+            alerts.append(row)
+        alerts.sort(key=lambda row:row["days_remaining"])
+        return {"items":alerts,"expired":sum(1 for row in alerts if row["days_remaining"]<0),
+            "expiring":sum(1 for row in alerts if row["days_remaining"]>=0),"days":int(days)}
+
+    # ---------------------------------------------------------------- VAT recoverability
+    def set_vat_recoverable(self, source, document_id, recoverable, user_id):
+        """Mark purchase/expense VAT as deductible or non-deductible.
+
+        Non-deductible VAT is a cost, so a reclassification entry moves it from the VAT
+        receivable account to the expense/asset account; marking it deductible again removes it."""
+        source=str(source or "").lower(); document_id=int(document_id); recoverable=1 if recoverable else 0
+        if source not in ("invoice","expense"): raise ValueError("VAT status can only be changed on invoices or expenses")
+        with self.connect() as db:
+            if source=="invoice":
+                row=db.execute("SELECT * FROM invoices WHERE id=?",(document_id,)).fetchone()
+                if not row: raise KeyError("Invoice not found")
+                if row["kind"]!="purchase": raise ValueError("Only purchase and expense VAT can be non-deductible")
+                if row["status"]=="cancelled": raise ValueError("Cancelled invoices cannot be changed")
+                date=row["invoice_date"]; vat=Decimal(str(row["vat"] or 0)); cost_account=row["expense_account"]; vat_account=row["vat_account"]
+                number=row["invoice_number"]; currency=row["currency"]; branch_id=row["branch_id"]; party_id=row["party_id"]
+            else:
+                row=db.execute("SELECT * FROM expenses WHERE id=?",(document_id,)).fetchone()
+                if not row: raise KeyError("Expense not found")
+                date=row["expense_date"]; vat=Decimal(str(row["vat"] or 0)); cost_account=row["expense_account"]; vat_account=row["vat_account"]
+                number=row["reference"] or f"EXP-{document_id}"; currency=row["currency"]; branch_id=None; party_id=None
+        self._assert_period_open(date)
+        with self.connect() as db:
+            table="invoices" if source=="invoice" else "expenses"
+            old=db.execute("SELECT id FROM journal_entries WHERE source_type='vat_reclass' AND entry_number=?",(f"VATND-{source[:3].upper()}-{document_id}",)).fetchone()
+            if old:
+                db.execute("DELETE FROM journal_lines WHERE entry_id=?",(old["id"],)); db.execute("DELETE FROM journal_entries WHERE id=?",(old["id"],))
+            db.execute(f"UPDATE {table} SET vat_recoverable=? WHERE id=?",(recoverable,document_id))
+            if not recoverable and vat>0:
+                entry=db.execute("""INSERT INTO journal_entries(entry_number,entry_date,description,source_type,source_id,currency,branch_id,created_by,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?)""",(f"VATND-{source[:3].upper()}-{document_id}",date,f"Non-deductible VAT {number}","vat_reclass",document_id,currency,branch_id,user_id,utcnow())).lastrowid
+                for code,debit,credit in ((cost_account,vat,Decimal("0")),(vat_account,Decimal("0"),vat)):
+                    db.execute("INSERT INTO journal_lines(entry_id,account_id,party_id,description,debit,credit) VALUES(?,?,?,?,?,?)",
+                        (entry,self._account_id(db,code),party_id,"Non-deductible VAT reclassification",str(debit),str(credit)))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id,"vat_status",source,document_id,json.dumps({"vat_recoverable":recoverable,"vat":str(vat)}),utcnow()))
+        return {"source":source,"id":document_id,"vat_recoverable":recoverable}
+
+    # ---------------------------------------------------------------- departments, projects, budgets
+    def _dimension_ids(self, db, item):
+        """Resolve a department / project given by id, code or name. Blank means none."""
+        result = []
+        for table, key in (("departments", "department"), ("projects", "project")):
+            value = item.get(f"{key}_id") or item.get(key)
+            if value in (None, "", 0, "0", "None"): result.append(None); continue
+            text = str(value).split(" - ", 1)[0].strip()
+            row = db.execute(f"SELECT id FROM {table} WHERE id=? OR code=? OR lower(name)=lower(?)", (int(text) if text.isdigit() and not text.startswith("0") and len(text) < 6 else -1, text, text)).fetchone()
+            if not row: raise ValueError(f"{key.title()} '{text}' was not found")
+            result.append(row["id"])
+        return tuple(result)
+
+    def list_departments(self, include_inactive=True):
+        with self.connect() as db:
+            where = "" if include_inactive else " WHERE active=1"
+            return [dict(row) for row in db.execute(f"SELECT * FROM departments{where} ORDER BY code")]
+
+    def save_department(self, item, user_id):
+        name = str(item.get("name") or "").strip(); code = str(item.get("code") or "").strip().upper()
+        if not name: raise ValueError("Department name is required")
+        with self.connect() as db:
+            if not code:
+                numbers = [int(r["code"][1:]) for r in db.execute("SELECT code FROM departments WHERE code GLOB 'D[0-9]*'") if r["code"][1:].isdigit()]
+                code = f"D{max(numbers, default=0) + 1:02d}"
+            clash = db.execute("SELECT id FROM departments WHERE code=? AND id<>?", (code, int(item.get("id") or 0))).fetchone()
+            if clash: raise ValueError(f"Department code {code} is already used")
+            active = 1 if item.get("active", True) else 0
+            if item.get("id"):
+                db.execute("UPDATE departments SET code=?,name=?,active=? WHERE id=?", (code, name, active, int(item["id"]))); saved = int(item["id"])
+            else:
+                saved = db.execute("INSERT INTO departments(code,name,active,created_at) VALUES(?,?,?,?)", (code, name, active, utcnow())).lastrowid
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id, "save", "department", saved, json.dumps({"code": code, "name": name}), utcnow()))
+            return dict(db.execute("SELECT * FROM departments WHERE id=?", (saved,)).fetchone())
+
+    def list_projects(self, include_inactive=True):
+        with self.connect() as db:
+            where = "" if include_inactive else " WHERE p.active=1"
+            return [dict(row) for row in db.execute(f"""SELECT p.*,c.name party_name FROM projects p LEFT JOIN parties c ON c.id=p.party_id{where} ORDER BY p.code""")]
+
+    def save_project(self, item, user_id):
+        name = str(item.get("name") or "").strip(); code = str(item.get("code") or "").strip().upper()
+        if not name: raise ValueError("Project name is required")
+        status = str(item.get("status") or "open").lower()
+        if status not in ("open", "on hold", "completed", "cancelled"): raise ValueError("Status must be Open, On Hold, Completed or Cancelled")
+        start = iso_date(item["start_date"], "Start date") if str(item.get("start_date") or "").strip() else None
+        end = iso_date(item["end_date"], "End date") if str(item.get("end_date") or "").strip() else None
+        if start and end and end < start: raise ValueError("End date cannot be before start date")
+        with self.connect() as db:
+            if not code:
+                year = (start or datetime.now().strftime("%Y"))[:4]
+                numbers = [int(r["code"].rsplit("-", 1)[-1]) for r in db.execute("SELECT code FROM projects WHERE code LIKE ?", (f"P{year}-%",)) if r["code"].rsplit("-", 1)[-1].isdigit()]
+                code = f"P{year}-{max(numbers, default=0) + 1:03d}"
+            clash = db.execute("SELECT id FROM projects WHERE code=? AND id<>?", (code, int(item.get("id") or 0))).fetchone()
+            if clash: raise ValueError(f"Project code {code} is already used")
+            party = item.get("party_id")
+            if not party and str(item.get("party_name") or "").strip():
+                row = db.execute("SELECT id FROM parties WHERE name=? ORDER BY id LIMIT 1", (str(item["party_name"]).strip(),)).fetchone()
+                if not row: raise ValueError(f"Customer '{item['party_name']}' was not found")
+                party = row["id"]
+            values = (code, name, int(party) if party else None, start, end, status, str(item.get("notes") or "").strip() or None, 1 if item.get("active", True) else 0)
+            if item.get("id"):
+                db.execute("UPDATE projects SET code=?,name=?,party_id=?,start_date=?,end_date=?,status=?,notes=?,active=? WHERE id=?", values + (int(item["id"]),)); saved = int(item["id"])
+            else:
+                saved = db.execute("INSERT INTO projects(code,name,party_id,start_date,end_date,status,notes,active,created_at) VALUES(?,?,?,?,?,?,?,?,?)", values + (utcnow(),)).lastrowid
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id, "save", "project", saved, json.dumps({"code": code, "name": name}), utcnow()))
+        return next(p for p in self.list_projects() if p["id"] == saved)
+
+    def list_budgets(self, year, currency="USD", department=None, project=None):
+        with self.connect() as db:
+            department_id, project_id = self._dimension_ids(db, {"department": department, "project": project})
+            rows = [dict(row) for row in db.execute("""SELECT b.account_code,b.month,CAST(b.amount AS REAL) amount,a.name_en account_name,a.type account_type
+                FROM budgets b LEFT JOIN accounts a ON a.code=b.account_code WHERE b.year=? AND b.currency=? AND b.department_id=? AND b.project_id=?
+                ORDER BY b.account_code,b.month""", (int(year), str(currency).upper(), department_id or 0, project_id or 0))]
+        accounts = {}
+        for row in rows:
+            item = accounts.setdefault(row["account_code"], {"account_code": row["account_code"], "account_name": row["account_name"] or "", "account_type": row["account_type"],
+                                                               "annual": 0.0, "months": [0.0] * 12})
+            if row["month"]: item["months"][row["month"] - 1] = row["amount"]
+            else: item["annual"] = row["amount"]
+        for item in accounts.values():
+            if not item["annual"]: item["annual"] = round(sum(item["months"]), 2)
+        return list(accounts.values())
+
+    def save_budget(self, item, user_id):
+        year = int(item.get("year") or 0); currency = str(item.get("currency") or "USD").upper()
+        if year < 2000 or year > 2100: raise ValueError("Enter a valid budget year")
+        if currency not in ("USD", "EUR", "LBP", "AED"): raise ValueError("Invalid budget currency")
+        lines = item.get("lines")
+        if not isinstance(lines, list): raise ValueError("Budget lines are missing")
+        with self.connect() as db:
+            department_id, project_id = self._dimension_ids(db, {"department": item.get("department"), "project": item.get("project")})
+            department_id = department_id or 0; project_id = project_id or 0
+            db.execute("DELETE FROM budgets WHERE year=? AND currency=? AND department_id=? AND project_id=?", (year, currency, department_id, project_id))
+            saved = 0
+            for index, line in enumerate(lines, 1):
+                code = str(line.get("account_code") or "").split(" - ", 1)[0].strip()
+                if not code: continue
+                if not db.execute("SELECT 1 FROM accounts WHERE code=?", (code,)).fetchone(): raise ValueError(f"Line {index}: account {code} was not found")
+                months = [Decimal(str(v or 0).replace(",", "")) for v in (line.get("months") or [0] * 12)][:12]
+                annual = Decimal(str(line.get("annual") or 0).replace(",", ""))
+                if any(v < 0 for v in months) or annual < 0: raise ValueError(f"Line {index}: budget amounts cannot be negative")
+                if any(months):
+                    for month, value in enumerate(months, 1):
+                        if value: db.execute("INSERT INTO budgets(year,currency,account_code,department_id,project_id,month,amount,updated_by,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                                             (year, currency, code, department_id, project_id, month, str(value), user_id, utcnow()))
+                elif annual:
+                    db.execute("INSERT INTO budgets(year,currency,account_code,department_id,project_id,month,amount,updated_by,updated_at) VALUES(?,?,?,?,?,0,?,?,?)",
+                               (year, currency, code, department_id, project_id, str(annual), user_id, utcnow()))
+                else: continue
+                saved += 1
+            db.execute("INSERT INTO audit_log(user_id,action,entity,details,created_at) VALUES(?,?,?,?,?)",
+                (user_id, "save", "budget", json.dumps({"year": year, "currency": currency, "department_id": department_id, "project_id": project_id, "accounts": saved}), utcnow()))
+        return self.list_budgets(year, currency, department_id or None, project_id or None)
+
+    def budget_for_period(self, currency, date_from, date_to, department_id=None, project_id=None):
+        """Budget per account for a date range. Annual budgets are spread evenly over 12 months."""
+        start = iso_date(date_from); end = iso_date(date_to); result = {}
+        months = []; year, month = int(start[:4]), int(start[5:7])
+        while (year, month) <= (int(end[:4]), int(end[5:7])):
+            months.append((year, month)); month += 1
+            if month > 12: year, month = year + 1, 1
+        with self.connect() as db:
+            for year, month in months:
+                for row in db.execute("""SELECT account_code,month,amount FROM budgets WHERE year=? AND currency=? AND (month=? OR month=0)
+                        AND department_id=? AND project_id=?""", (year, str(currency).upper(), month, department_id or 0, project_id or 0)):
+                    value = Decimal(str(row["amount"])) / (12 if row["month"] == 0 else 1)
+                    result[row["account_code"]] = result.get(row["account_code"], Decimal("0")) + value
+        return result
+
+    # ---------------------------------------------------------------- numbering helpers
+    def _next_number(self, db, table, column, prefix, date):
+        try: year = self._date_year(date)
+        except ValueError: year = datetime.now().year
+        pattern = f"{prefix}-{year}-"
+        numbers = [int(row["value"].rsplit("-", 1)[-1]) for row in db.execute(f"SELECT {column} value FROM {table} WHERE {column} LIKE ?", (pattern + "%",))
+                   if str(row["value"]).rsplit("-", 1)[-1].isdigit()]
+        return f"{pattern}{max(numbers, default=0) + 1:06d}"
+
+    def _next_payment_number(self, db, kind, date):
+        return self._next_number(db, "payments", "payment_number", "RV" if kind == "customer_receipt" else "PV", date)
+
+    def next_document_number(self, kind, date=None):
+        date = date or datetime.now().strftime("%d-%m-%Y")
+        with self.connect() as db:
+            if kind in ("customer_receipt", "supplier_payment"): return self._next_payment_number(db, kind, date)
+            if kind == "expense": return self._next_number(db, "expenses", "expense_number", "EXP", date)
+            if kind == "purchase": return self.next_invoice_number("purchase", date)
+        raise ValueError("Unknown document type")
+
+    # ---------------------------------------------------------------- receipts and payments: edit / delete
+    def _remove_entries(self, db, source_type, source_id, extra_numbers=()):
+        db.execute("DELETE FROM journal_entries WHERE source_type=? AND source_id=?", (source_type, int(source_id)))
+        for number in extra_numbers: db.execute("DELETE FROM journal_entries WHERE entry_number=?", (number,))
+
+    def delete_payment(self, payment_id, user_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM payments WHERE id=?", (int(payment_id),)).fetchone()
+            if not row: raise KeyError("Payment not found")
+        self._assert_period_open(row["payment_date"])
+        with self.connect() as db:
+            self._remove_entries(db, "payment", payment_id); db.execute("DELETE FROM payments WHERE id=?", (int(payment_id),))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id, "delete", "payment", int(payment_id), json.dumps({"number": row["payment_number"], "amount": row["amount"]}), utcnow()))
+        return {"deleted": int(payment_id)}
+
+    def update_payment(self, payment_id, item, user_id):
+        return self._safe_replacement("payment", payment_id, item, user_id)
+
+    def _replace_payment_on_stage(self, payment_id, item, user_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM payments WHERE id=?", (int(payment_id),)).fetchone()
+            if not row: raise KeyError("Payment not found")
+        item = {**item, "kind": row["kind"], "payment_number": row["payment_number"]}
+        self._assert_period_open(row["payment_date"])
+        self.delete_payment(payment_id, user_id)
+        return self.add_payment(item, user_id)
+
+    def _safe_replacement(self, kind, record_id, item, user_id):
+        """Validate destructive edits on a snapshot; publish only a complete result."""
+        with self._lock, tempfile.TemporaryDirectory() as directory:
+            stage_path=Path(directory)/"edited.db"
+            with closing(sqlite3.connect(self.path)) as source, closing(sqlite3.connect(stage_path)) as stage:
+                source.backup(stage)
+            stage_db=Database(stage_path)
+            operation=stage_db._replace_payment_on_stage if kind=="payment" else stage_db._replace_expense_on_stage
+            new_id=operation(record_id,item,user_id)
+            self.backup("safety")
+            with closing(sqlite3.connect(stage_path)) as source, closing(sqlite3.connect(self.path)) as target:
+                source.backup(target)
+            return new_id
+
+    # ---------------------------------------------------------------- expenses: edit / delete / attachments
+    def delete_expense(self, expense_id, user_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM expenses WHERE id=?", (int(expense_id),)).fetchone()
+            if not row: raise KeyError("Expense not found")
+        self._assert_period_open(row["expense_date"])
+        with self.connect() as db:
+            self._remove_entries(db, "expense", expense_id, (f"VATND-EXP-{int(expense_id)}",)); db.execute("DELETE FROM expenses WHERE id=?", (int(expense_id),))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id, "delete", "expense", int(expense_id), json.dumps({"number": row["expense_number"], "total": row["total"]}), utcnow()))
+        return {"deleted": int(expense_id)}
+
+    def update_expense(self, expense_id, item, user_id):
+        return self._safe_replacement("expense", expense_id, item, user_id)
+
+    def _replace_expense_on_stage(self, expense_id, item, user_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM expenses WHERE id=?", (int(expense_id),)).fetchone()
+            if not row: raise KeyError("Expense not found")
+            files = [dict(r) for r in db.execute("SELECT file_name,mime_type,content FROM expense_attachments WHERE expense_id=?", (int(expense_id),))]
+        self._assert_period_open(row["expense_date"])
+        self.delete_expense(expense_id, user_id)
+        new_id = self.add_expense({**item, "expense_number": row["expense_number"]}, user_id)
+        for f in files: self.add_expense_attachment(new_id, f["file_name"], f["mime_type"], f["content"], user_id)
+        return new_id
+
+    def add_expense_attachment(self, expense_id, file_name, mime_type, content, user_id):
+        if not file_name or not content: raise ValueError("Attachment file is required")
+        if len(content) > 15 * 1024 * 1024: raise ValueError("Attachment cannot exceed 15 MB")
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM expenses WHERE id=?", (int(expense_id),)).fetchone(): raise KeyError("Expense not found")
+            return db.execute("INSERT INTO expense_attachments(expense_id,file_name,mime_type,content,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",
+                (int(expense_id), file_name, mime_type or "application/octet-stream", content, user_id, utcnow())).lastrowid
+
+    def list_expense_attachments(self, expense_id):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute("SELECT id,file_name,mime_type,length(content) size,uploaded_at FROM expense_attachments WHERE expense_id=? ORDER BY id DESC", (int(expense_id),))]
+
+    def get_expense_attachment(self, attachment_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM expense_attachments WHERE id=?", (int(attachment_id),)).fetchone()
+        if not row: raise KeyError("Attachment not found")
+        return dict(row)
+
+    # ---------------------------------------------------------------- invoices: edit keeping attachments, landed cost
+    def replace_manual_invoice(self, invoice_id, item, line_items, user_id):
+        """Edit a saved invoice: the new version keeps its number and attachments, then the old one is removed."""
+        with self.connect() as db:
+            old = db.execute("SELECT * FROM invoices WHERE id=?", (int(invoice_id),)).fetchone()
+            if not old: raise KeyError("Invoice not found")
+            files = [dict(r) for r in db.execute("SELECT file_name,mime_type,content FROM invoice_attachments WHERE invoice_id=?", (int(invoice_id),))]
+            linked = [r["id"] for r in db.execute("SELECT id FROM invoices WHERE linked_invoice_id=?", (int(invoice_id),))]
+        self._assert_period_open(old["invoice_date"])
+        item = {**item, "invoice_number": item.get("invoice_number") or old["invoice_number"]}
+        import inventory
+        with self.connect() as db: inventory.remove_invoice_documents(db, invoice_id)
+        new_id = self.create_manual_invoice(item, line_items, user_id)
+        with self.connect() as db:
+            for f in files:
+                db.execute("INSERT INTO invoice_attachments(invoice_id,file_name,mime_type,content,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",
+                    (new_id, f["file_name"], f["mime_type"], f["content"], user_id, utcnow()))
+            for linked_id in linked: db.execute("UPDATE invoices SET linked_invoice_id=? WHERE id=?", (new_id, linked_id))
+            if not old["vat_recoverable"]: db.execute("UPDATE invoices SET vat_recoverable=0 WHERE id=?", (new_id,))
+        if not old["vat_recoverable"]: self.set_vat_recoverable("invoice", new_id, False, user_id)
+        self.delete_invoice(invoice_id, user_id)
+        return new_id
+
+    def add_landed_cost(self, purchase_id, item, user_id):
+        """Customs / freight / insurance on a purchase, booked as a linked 'Customs Case' invoice so import VAT reaches the VAT return."""
+        with self.connect() as db:
+            purchase = db.execute("SELECT i.*,p.name party_name FROM invoices i LEFT JOIN parties p ON p.id=i.party_id WHERE i.id=?", (int(purchase_id),)).fetchone()
+        if not purchase or purchase["kind"] != "purchase": raise ValueError("Choose a purchase invoice first")
+        components = (("freight", "Freight"), ("insurance", "Insurance"), ("customs_duties", "Customs duties"), ("broker_fees", "Customs broker fees"), ("other_costs", "Other landed costs"))
+        lines = []
+        for key, label in components:
+            try: amount = Decimal(str(item.get(key) or 0).replace(",", ""))
+            except Exception as exc: raise ValueError(f"{label} must be a number") from exc
+            if amount < 0: raise ValueError(f"{label} cannot be negative")
+            if amount: lines.append({"description": f"{label} - {purchase['invoice_number']}", "quantity": 1, "unit_price": str(amount), "deductible_subtotal": str(amount), "vat_rate": 0, "vat": 0})
+        try: import_vat = Decimal(str(item.get("import_vat") or 0).replace(",", ""))
+        except Exception as exc: raise ValueError("Import VAT must be a number") from exc
+        if not lines and not import_vat: raise ValueError("Enter at least one landed-cost amount")
+        if not lines: lines.append({"description": f"Import VAT - {purchase['invoice_number']}", "quantity": 1, "unit_price": "0", "deductible_subtotal": "0", "vat_rate": 0, "vat": 0})
+        lines[0]["vat"] = str(import_vat)
+        declaration = str(item.get("customs_declaration_no") or "").strip()
+        supplier_account=None; party_name=str(item.get("party_name") or "Lebanese Customs").strip()
+        if str(item.get("party_id") or "").strip():
+            with self.connect() as db:
+                chosen=db.execute("SELECT * FROM parties WHERE id=?",(int(item["party_id"]),)).fetchone()
+            if chosen:
+                party_name=chosen["name"]
+                supplier_account=chosen["account_number"] or None
+        invoice = {"invoice_number": declaration or f"LC-{purchase['invoice_number']}", "invoice_date": item.get("date") or purchase["invoice_date"],
+                   "party_name": party_name, "kind": "purchases", "currency": item.get("currency") or purchase["currency"],
+                   "expense_account": purchase["expense_account"], "status": "posted", "source_file": "Customs Case",
+                   "description": f"Landed cost of {purchase['invoice_number']} ({purchase['party_name'] or ''})" + (f" - declaration {declaration}" if declaration else ""),
+                   "department_id": purchase["department_id"], "project_id": purchase["project_id"]}
+        if supplier_account: invoice["supplier_account"]=supplier_account
+        invoice_id = self.create_manual_invoice(invoice, lines, user_id)
+        # each cost goes to its own 9-digit 6018 account (freight, insurance, duties, broker, other)
+        import chart_extra
+        with self.connect() as db:
+            db.execute("UPDATE invoices SET linked_invoice_id=? WHERE id=?", (int(purchase_id), invoice_id))
+            entry = db.execute("SELECT id FROM journal_entries WHERE source_type='invoice' AND source_id=?", (invoice_id,)).fetchone()
+            cost_account = self._account_id(db, purchase["expense_account"])
+            parts = [(chart_extra.LANDED_COST_ACCOUNTS[key], Decimal(str(item.get(key) or 0).replace(",", ""))) for key, _label in components]
+            parts = [(code, amount) for code, amount in parts if amount]
+            if entry and parts:
+                line = db.execute("SELECT * FROM journal_lines WHERE entry_id=? AND account_id=? AND CAST(debit AS REAL)>0 ORDER BY id LIMIT 1", (entry["id"], cost_account)).fetchone()
+                if line:
+                    db.execute("DELETE FROM journal_lines WHERE id=?", (line["id"],))
+                    for code, amount in parts:
+                        db.execute("INSERT INTO journal_lines(entry_id,account_id,party_id,description,debit,credit,department_id,project_id) VALUES(?,?,?,?,?,?,?,?)",
+                            (entry["id"], self._account_id(db, code), line["party_id"], f"Cost on purchase {purchase['invoice_number']}", str(amount), "0", line["department_id"], line["project_id"]))
+        return invoice_id
+
+    def landed_costs(self, purchase_id):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,p.name party_name,i.currency,CAST(i.subtotal AS REAL) subtotal,
+                CAST(i.vat AS REAL) vat,CAST(i.total AS REAL) total FROM invoices i LEFT JOIN parties p ON p.id=i.party_id WHERE i.linked_invoice_id=? AND i.status<>'cancelled' ORDER BY i.id""", (int(purchase_id),))]
+
+    # ---------------------------------------------------------------- Lebanese VAT classification
+    SALE_TREATMENTS = ("standard", "zero_rated", "exempt", "out_of_scope")
+    PURCHASE_TREATMENTS = ("standard", "reverse_charge")
+    VAT_USES = ("taxable", "mixed", "exempt", "export")
+
+    def _vat_classification(self, item, kind):
+        """VAT treatment of a sale (standard 11% / zero-rated / exempt / out of scope) or purchase (standard / reverse charge),
+        and for purchases what the input VAT is used for (taxable sales only, mixed = partial deduction, exempt sales only)."""
+        treatment = str(item.get("vat_treatment") or "standard").lower().replace(" ", "_").replace("-", "_")
+        treatment = {"taxable": "standard", "zero": "zero_rated", "export": "zero_rated", "outside": "out_of_scope"}.get(treatment, treatment)
+        allowed = self.SALE_TREATMENTS if kind in ("sale", "sales") else self.PURCHASE_TREATMENTS
+        if treatment not in allowed: raise ValueError("VAT treatment must be one of: " + ", ".join(t.replace("_", " ") for t in allowed))
+        use = str(item.get("vat_use") or "mixed").lower()
+        if use not in self.VAT_USES: raise ValueError("VAT use must be taxable, mixed, exempt or export")
+        return treatment, use
+
+    def set_vat_classification(self, source, document_id, treatment=None, use=None, user_id=None):
+        source = str(source or "").lower(); document_id = int(document_id)
+        table = {"invoice": "invoices", "expense": "expenses"}.get(source)
+        if not table: raise ValueError("VAT classification can only be changed on invoices or expenses")
+        with self.connect() as db:
+            row = db.execute(f"SELECT * FROM {table} WHERE id=?", (document_id,)).fetchone()
+            if not row: raise KeyError("Document not found")
+        self._assert_period_open(row["invoice_date"] if table == "invoices" else row["expense_date"])
+        kind = row["kind"] if table == "invoices" else "purchase"
+        current = {"vat_treatment": row["vat_treatment"] if table == "invoices" else "standard", "vat_use": row["vat_use"]}
+        new_treatment, new_use = self._vat_classification({"vat_treatment": treatment or current["vat_treatment"], "vat_use": use or current["vat_use"]}, kind)
+        with self.connect() as db:
+            if table == "invoices": db.execute("UPDATE invoices SET vat_treatment=?,vat_use=? WHERE id=?", (new_treatment, new_use, document_id))
+            else: db.execute("UPDATE expenses SET vat_use=? WHERE id=?", (new_use, document_id))
+            db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+                (user_id, "vat_classification", source, document_id, json.dumps({"vat_treatment": new_treatment, "vat_use": new_use}), utcnow()))
+        return {"source": source, "id": document_id, "vat_treatment": new_treatment, "vat_use": new_use}
+
+    def vat_provisional_ratio(self, year):
+        with self.connect() as db:
+            row = db.execute("SELECT provisional_ratio FROM vat_settings WHERE year=?", (int(year),)).fetchone()
+        return Decimal(str(row["provisional_ratio"])) if row and row["provisional_ratio"] not in (None, "") else None
+
+    def save_vat_provisional_ratio(self, year, ratio, user_id):
+        if ratio in (None, ""):
+            with self.connect() as db: db.execute("DELETE FROM vat_settings WHERE year=?", (int(year),))
+            return None
+        try: value = Decimal(str(ratio).replace("%", "").replace(",", ""))
+        except Exception as exc: raise ValueError("The deduction ratio must be a percentage, for example 85") from exc
+        if value > 1: value = value / 100
+        if value < 0 or value > 1: raise ValueError("The deduction ratio must be between 0% and 100%")
+        with self.connect() as db:
+            db.execute("""INSERT INTO vat_settings(year,provisional_ratio,updated_by,updated_at) VALUES(?,?,?,?)
+                ON CONFLICT(year) DO UPDATE SET provisional_ratio=excluded.provisional_ratio,updated_by=excluded.updated_by,updated_at=excluded.updated_at""",
+                (int(year), str(value), user_id, utcnow()))
+        return value
+
+    # ---------------------------------------------------------------- NSSF payment
+    def record_nssf_payment(self, item, user_id):
+        """Payment of the NSSF statement: Dr NSSF payable / Cr cash or bank (payment voucher, type 03)."""
+        try: amount = Decimal(str(item.get("amount") or 0).replace(",", ""))
+        except Exception as exc: raise ValueError("Enter the amount paid") from exc
+        if amount <= 0: raise ValueError("The amount paid must be above zero")
+        currency = str(item.get("currency") or "LBP").upper(); date = str(item.get("payment_date") or datetime.now().strftime("%d-%m-%Y"))
+        cash = str(item.get("cash_account") or "531").split(" - ", 1)[0].strip()
+        settings = self.payroll_settings_for(iso_date(date))
+        try: payable = json.loads(settings.get("employee_account_map") or "{}").get("nssf") if isinstance(settings.get("employee_account_map"), str) else (settings.get("employee_account_map") or {}).get("nssf")
+        except ValueError: payable = None
+        payable = payable or "4431"
+        period = str(item.get("period_label") or "").strip(); reference = str(item.get("reference") or "").strip()
+        voucher = self.save_journal_voucher({"entry_date": date, "description": f"NSSF payment {period}".strip() + (f" - receipt {reference}" if reference else ""),
+                                             "currency": currency, "voucher_type": "03"},
+            [{"account_code": payable, "line_currency": currency, "side": "D", "amount": str(amount), "reference": reference},
+             {"account_code": cash, "line_currency": currency, "side": "C", "amount": str(amount), "reference": reference}], user_id)
+        return {"voucher": voucher["voucher"]["entry_number"], "amount": float(amount), "currency": currency}
+
+    # ---------------------------------------------------------------- invoice format, notes, allocations
+    def _store_invoice_format(self, invoice_id, item, line_items):
+        """Unit, line discount and invoice discount (for the printed invoice), and invoice / debit note / credit note."""
+        subtype = str(item.get("doc_subtype") or "invoice").lower()
+        if subtype not in ("invoice", "credit_note", "debit_note"): raise ValueError("Document must be an invoice, a debit note or a credit note")
+        with self.connect() as db:
+            ids = [row["id"] for row in db.execute("SELECT id FROM invoice_items WHERE invoice_id=? ORDER BY id", (int(invoice_id),))]
+            for item_id, line in zip(ids, line_items):
+                db.execute("UPDATE invoice_items SET unit=?,discount_percent=?,discount_amount=?,gross_amount=? WHERE id=?",
+                    (str(line.get("unit") or "") or None, str(line.get("discount_percent") or 0), str(line.get("discount_amount") or 0), str(line.get("gross_amount") or ""), item_id))
+            db.execute("UPDATE invoices SET doc_subtype=?,invoice_discount_percent=?,invoice_discount_amount=?,gross_before_discount=?,notes=? WHERE id=?",
+                (subtype, str(item.get("invoice_discount_percent") or 0), str(item.get("invoice_discount_amount") or 0), str(item.get("gross_before_discount") or ""),
+                 str(item.get("notes") or "") or None, int(invoice_id)))
+
+    def open_documents(self, party_id):
+        """Invoices of a customer / supplier with what is still unpaid (after amounts paid and allocations)."""
+        with self.connect() as db:
+            rows = [dict(r) for r in db.execute("""SELECT i.id,i.invoice_number,i.invoice_date,i.kind,i.doc_subtype,i.currency,CAST(i.total AS REAL) total,
+                CAST(COALESCE(i.amount_paid,'0') AS REAL) paid,(SELECT COALESCE(SUM(CAST(a.amount AS REAL)),0) FROM payment_allocations a WHERE a.invoice_id=i.id) allocated
+                FROM invoices i WHERE i.party_id=? AND i.status<>'cancelled' ORDER BY i.id""", (int(party_id),))]
+        for row in rows:
+            sign = -1 if row.get("doc_subtype") == "credit_note" else 1
+            row["open_amount"] = round(sign * row["total"] - row["paid"] - row["allocated"], 2)
+        return [r for r in rows if abs(r["open_amount"]) >= 0.01]
+
+    def save_allocations(self, payment_id, allocations, user_id):
+        with self.connect() as db:
+            payment = db.execute("SELECT * FROM payments WHERE id=?", (int(payment_id),)).fetchone()
+            if not payment: raise KeyError("Payment not found")
+            db.execute("DELETE FROM payment_allocations WHERE payment_id=?", (int(payment_id),))
+            total = Decimal("0")
+            for entry in allocations or []:
+                amount = Decimal(str(entry.get("amount") or 0).replace(",", ""))
+                if amount <= 0: continue
+                invoice = db.execute("SELECT * FROM invoices WHERE id=?", (int(entry["invoice_id"]),)).fetchone()
+                if not invoice or invoice["party_id"] != payment["party_id"]: raise ValueError("Allocate only to documents of the same customer / supplier")
+                if invoice["currency"] != payment["currency"]: raise ValueError(f"{invoice['invoice_number']} is in {invoice['currency']}; the payment is in {payment['currency']}")
+                total += amount
+                db.execute("INSERT INTO payment_allocations(payment_id,invoice_id,amount,created_at) VALUES(?,?,?,?)", (int(payment_id), invoice["id"], str(amount), utcnow()))
+            if total > Decimal(str(payment["amount"])) + Decimal("0.005"): raise ValueError(f"Allocated {total:,.2f} is more than the payment {Decimal(str(payment['amount'])):,.2f}")
+        return self.payment_allocations(payment_id)
+
+    def payment_allocations(self, payment_id):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute("""SELECT a.invoice_id,i.invoice_number,i.invoice_date,CAST(a.amount AS REAL) amount FROM payment_allocations a
+                JOIN invoices i ON i.id=a.invoice_id WHERE a.payment_id=? ORDER BY a.id""", (int(payment_id),))]

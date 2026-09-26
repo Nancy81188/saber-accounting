@@ -4,6 +4,7 @@ import json
 import re
 import secrets
 import sqlite3
+from contextlib import closing
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -51,18 +52,27 @@ class CompanyManager:
 
     def database(self,company_id=None,year=None):
         companies=self.list_companies(True)
-        company=next((c for c in companies if c["id"]==(company_id or "saber-for-audit")),None) or companies[0]
+        if not companies: raise KeyError("No company is configured")
+        company=next((c for c in companies if c["id"]==company_id),None) if company_id else companies[0]
+        if not company: raise KeyError("Company not found")
         years=company.get("years",[])
         selected=next((y for y in years if int(y["year"])==int(year)),None) if year else (max(years,key=lambda y:int(y["year"])) if years else None)
         if not selected: raise KeyError("Fiscal year not found")
         path=str(Path(selected["database"]).resolve())
-        if path not in self._cache: self._cache[path]=Database(path)
+        if path not in self._cache:
+            database=Database(path)
+            safe="".join(ch for ch in company["name"] if ch.isalnum() or ch in " -_&.").strip() or company["id"]
+            database.backup_folder=str(self.master_path.parent/"backups"/safe/str(selected["year"])); database.backup_label=f'{safe}_{selected["year"]}'
+            # Bring files made by an older version up to date (new tables and columns); existing data is kept.
+            if Path(path).exists() and Path(path)!=self.master_path: database.initialize(secrets.token_urlsafe(24))
+            self._cache[path]=database
         return self._cache[path]
 
     def year_status(self,company_id,year):
-        company=self._company(company_id or "saber-for-audit")
+        company=self._company(company_id)
         selected=next((item for item in company.get("years",[]) if int(item["year"])==int(year)),None)
-        return selected.get("status","open") if selected else "open"
+        if not selected: raise KeyError("Fiscal year not found")
+        return selected.get("status","open")
 
     def create_company(self,item,master_db):
         name=str(item.get("name") or "").strip(); year=int(item.get("year") or datetime.now().year)
@@ -98,9 +108,36 @@ class CompanyManager:
         previous=max((y for y in company["years"] if int(y["year"])<year),key=lambda y:int(y["year"]),default=None)
         if not previous: raise ValueError("Create fiscal years in chronological order")
         source=Database(previous["database"])
-        path=self.root/company_id/f"{year}.db"; target=Database(path); target.initialize(secrets.token_urlsafe(24)); self._copy_master_data(source,target)
+        path=self.root/company_id/f"{year}.db"; path.parent.mkdir(parents=True,exist_ok=True); target=Database(path); target.initialize(secrets.token_urlsafe(24)); self._copy_master_data(source,target)
+        import inventory
+        inventory.carry_forward(source,target,year,user_id)
         company["years"].append({"year":year,"database":str(path.resolve()),"status":"open"}); company["years"].sort(key=lambda y:int(y["year"]))
         self._write(data); return company
+
+    def delete_year(self,company_id,year,user_id):
+        """Remove the LAST fiscal year of a company (for example to redo the opening). The file is kept as a backup
+        in the company's 'deleted_years' folder, and the previous year is reopened (its closing is removed)."""
+        import shutil
+        from datetime import datetime as _dt
+        year=int(year); data=self._read(); company=next((c for c in data["companies"] if c["id"]==company_id),None)
+        if not company: raise KeyError("Company not found")
+        years=sorted(company.get("years",[]),key=lambda y:int(y["year"]))
+        current=next((y for y in years if int(y["year"])==year),None)
+        if not current: raise ValueError(f"Fiscal year {year} was not found for this company")
+        if int(years[-1]["year"])!=year: raise ValueError(f"Only the last fiscal year can be deleted ({years[-1]['year']}). Delete the later years first.")
+        if len(years)==1: raise ValueError("The only fiscal year of a company cannot be deleted")
+        path=Path(current["database"]).resolve()
+        if path==self.master_path.resolve(): raise ValueError("This year uses the main database file and cannot be deleted")
+        backup_folder=self.root/company_id/"deleted_years"; backup_folder.mkdir(parents=True,exist_ok=True)
+        backup=backup_folder/f"{year}_deleted_{_dt.now():%Y%m%d_%H%M%S}.db"
+        self._cache.pop(str(path),None)
+        if path.exists(): shutil.move(str(path),str(backup))
+        company["years"]=[y for y in company["years"] if int(y["year"])!=year]
+        previous=years[-2]
+        self._write(data)
+        reopened=self.reopen_year(company_id,int(previous["year"]),user_id)
+        return {"deleted_year":year,"backup":str(backup),"reopened_year":int(previous["year"]),"removed_closing_entries":reopened.get("removed_closing_entries",0),
+                "company":reopened["company"]}
 
     def reopen_year(self,company_id,year,user_id):
         year=int(year); data=self._read(); company=next((c for c in data["companies"] if c["id"]==company_id),None)
@@ -130,6 +167,8 @@ class CompanyManager:
             db.execute("INSERT INTO audit_log(user_id,action,entity,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
                 (user_id,"refresh_opening","fiscal_year",target_year,json.dumps({"source_year":source_year,"replaced":len(ids)}),utcnow()))
         vouchers=self._opening_balances(source,target,target_year,user_id)
+        import inventory
+        inventory.carry_forward(source,target,target_year,user_id)
         return {"source_year":source_year,"target_year":target_year,"opening_vouchers":vouchers,"replaced":len(ids),"provisional":source_record.get("status")!="closed"}
 
     def close_and_open_year(self,company_id,year,user_id):
@@ -141,21 +180,32 @@ class CompanyManager:
         if not current: raise ValueError("Fiscal year not found for this company")
         next_record=next((item for item in company.get("years",[]) if int(item["year"])==next_year),None)
         source=Database(current["database"])
-        close_result=source.close_fiscal_year(year,user_id)
-        current["status"]="closed"
-        if next_record:
-            path=Path(next_record["database"]); target=Database(path)
-            with target.connect() as db:
-                ids=[row["id"] for row in db.execute("SELECT id FROM journal_entries WHERE source_type='opening' AND entry_number LIKE ?",(f"OPEN-{next_year}-%",))]
-                for entry_id in ids: db.execute("DELETE FROM journal_entries WHERE id=?",(entry_id,))
-        else:
-            path=self.root/company_id/f"{next_year}.db"
-            target=Database(path); target.initialize(secrets.token_urlsafe(24)); self._copy_master_data(source,target)
-        opening_vouchers=self._opening_balances(source,target,next_year,user_id)
-        if not next_record: company["years"].append({"year":next_year,"database":str(path.resolve()),"status":"open"})
-        company["years"].sort(key=lambda item:int(item["year"]))
-        self._write(data)
-        return {**close_result,"company":company,"opening_vouchers":opening_vouchers}
+        source_backup=source.backup("safety")
+        target_backup=Database(next_record["database"]).backup("safety") if next_record else None
+        try:
+            close_result=source.close_fiscal_year(year,user_id)
+            current["status"]="closed"
+            if next_record:
+                path=Path(next_record["database"]); target=Database(path)
+                with target.connect() as db:
+                    ids=[row["id"] for row in db.execute("SELECT id FROM journal_entries WHERE source_type='opening' AND entry_number LIKE ?",(f"OPEN-{next_year}-%",))]
+                    for entry_id in ids: db.execute("DELETE FROM journal_entries WHERE id=?",(entry_id,))
+            else:
+                path=self.root/company_id/f"{next_year}.db"; path.parent.mkdir(parents=True,exist_ok=True)
+                target=Database(path); target.initialize(secrets.token_urlsafe(24)); self._copy_master_data(source,target)
+            opening_vouchers=self._opening_balances(source,target,next_year,user_id)
+            import inventory
+            stock_openings=inventory.carry_forward(source,target,next_year,user_id)
+            if not next_record: company["years"].append({"year":next_year,"database":str(path.resolve()),"status":"open"})
+            company["years"].sort(key=lambda item:int(item["year"]))
+            self._write(data)
+        except Exception:
+            # Restore both company-year files to their pre-close state; keep the safety copies.
+            with closing(sqlite3.connect(source_backup)) as old,closing(sqlite3.connect(source.path)) as live: old.backup(live)
+            if target_backup:
+                with closing(sqlite3.connect(target_backup)) as old,closing(sqlite3.connect(next_record["database"])) as live: old.backup(live)
+            raise
+        return {**close_result,"company":company,"opening_vouchers":opening_vouchers,"stock_openings":stock_openings}
 
     def _copy_master_data(self,source,target):
         with source.connect() as src, target.connect() as dst:
@@ -166,23 +216,19 @@ class CompanyManager:
                 if table=="accounts": dst.execute("UPDATE accounts SET parent_id=NULL")
                 dst.execute(f"DELETE FROM {table}")
                 placeholders=",".join("?" for _ in columns)
-                dst.executemany(f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})",[tuple(row[col] for col in columns) for row in rows])
+                if table=="accounts" and "parent_id" in columns:
+                    # insert with parent_id detached, then re-link by code so row order never trips the FK
+                    pid=columns.index("parent_id"); code_by_id={row["id"]:row["code"] for row in rows}
+                    detached=[]
+                    for row in rows:
+                        vals=list(row[col] for col in columns); vals[pid]=None; detached.append(tuple(vals))
+                    dst.executemany(f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})",detached)
+                    for row in rows:
+                        if row["parent_id"] and row["parent_id"] in code_by_id:
+                            dst.execute("UPDATE accounts SET parent_id=(SELECT id FROM accounts WHERE code=?) WHERE code=?",(code_by_id[row["parent_id"]],row["code"]))
+                else:
+                    dst.executemany(f"INSERT INTO {table}({','.join(columns)}) VALUES({placeholders})",[tuple(row[col] for col in columns) for row in rows])
 
     def _opening_balances(self,source,target,year,user_id):
-        rows=source.trial_balance(to_date=f"{year-1}-12-31")
-        by_currency={}
-        for row in rows:
-            balance=float(row.get("balance") or 0)
-            if abs(balance)>=0.005: by_currency.setdefault(row["currency"],[]).append((row["code"],balance))
-        vouchers=[]
-        with target.connect() as db:
-            branch=db.execute("SELECT id FROM branches ORDER BY id LIMIT 1").fetchone()
-            for currency,lines in by_currency.items():
-                number=f"OPEN-{year}-{currency}"
-                entry=db.execute("INSERT INTO journal_entries(entry_number,entry_date,description,source_type,currency,created_by,created_at,branch_id) VALUES(?,?,?,?,?,?,?,?)",
-                    (number,f"01-01-{year}",f"Opening balances {year}","opening",currency,user_id,utcnow(),branch["id"] if branch else None))
-                for code,balance in lines:
-                    account=db.execute("SELECT id FROM accounts WHERE code=?",(code,)).fetchone()
-                    if account: db.execute("INSERT INTO journal_lines(entry_id,account_id,debit,credit) VALUES(?,?,?,?)",(entry.lastrowid,account["id"],str(max(balance,0)),str(max(-balance,0))))
-                vouchers.append(number)
-        return vouchers
+        import year_end
+        return year_end.post_opening(source,target,year,user_id)

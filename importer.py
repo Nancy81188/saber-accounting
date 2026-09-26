@@ -218,3 +218,123 @@ def read_invoices(path: str | Path, sheet_name: str | None = None, default_curre
     finally:
         workbook_values.close()
         workbook_formulas.close()
+
+
+def _header_map(sheet, keywords, scan=10):
+    """Find the heading row and map each wanted field to its column index."""
+    for row_number, row in enumerate(sheet.iter_rows(min_row=1, max_row=scan, values_only=True), 1):
+        labels = [str(value or "").strip().casefold() for value in row]
+        mapping = {}
+        for field, words in keywords.items():
+            for index, label in enumerate(labels):
+                if label and any(word in label for word in words) and index not in mapping.values(): mapping[field] = index; break
+        if len(mapping) >= 2: return row_number, mapping
+    raise ValueError("The Excel file has no heading row that Saber recognises")
+
+
+def read_expenses(path):
+    """Expenses from Excel: Date, Description, Category, Currency, Amount (with VAT base), Without VAT, VAT, Reference."""
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook.worksheets[0]
+        header, columns = _header_map(sheet, {"date": ("date", "تاريخ"), "description": ("description", "details", "بيان", "libell"), "category": ("category", "type"),
+            "currency": ("currency", "devise", "عملة"), "without_vat": ("without vat", "no vat", "exempt"), "vat": ("vat", "tva", "tax"),
+            "amount": ("amount", "before vat", "subtotal", "montant", "مبلغ"), "reference": ("reference", "ref", "invoice", "رقم")})
+        if "amount" not in columns and "without_vat" not in columns: raise ValueError("Add an Amount column to the Excel file")
+        rows = []
+        for number, row in enumerate(sheet.iter_rows(min_row=header + 1, values_only=True), header + 1):
+            if not any(value not in (None, "") for value in row): continue
+            get = lambda field: row[columns[field]] if field in columns and columns[field] < len(row) else None
+            def money(field):
+                value = get(field)
+                try: return float(str(value).replace(",", "")) if value not in (None, "") else 0.0
+                except ValueError: raise ValueError(f"Row {number}: {field.replace('_', ' ')} must be a number")
+            amount = money("amount"); without = money("without_vat"); vat = money("vat") if "vat" in columns else round(amount * 0.11, 2)
+            if not amount and not without: continue
+            rows.append({"expense_date": _date(get("date")), "description": str(get("description") or get("reference") or f"Expense row {number}").strip(),
+                         "category": str(get("category") or "General").strip(), "currency": str(get("currency") or "USD").strip().upper()[:3],
+                         "with_vat_subtotal": amount, "without_vat_subtotal": without, "vat": vat, "reference": str(get("reference") or "").strip(), "source_row": number})
+        return rows
+    finally: workbook.close()
+
+
+def read_customs_costs(path):
+    """Landed costs from a customs / broker Excel: totals of Freight, Insurance, Duties, Broker fees, Other, Import VAT."""
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook.worksheets[0]
+        header, columns = _header_map(sheet, {"freight": ("freight", "fret", "shipping"), "insurance": ("insurance", "assurance"),
+            "customs_duties": ("dut", "customs", "douane", "جمرك"), "broker_fees": ("broker", "clearance", "transit", "مخلص"),
+            "import_vat": ("vat", "tva"), "other_costs": ("other", "port", "storage", "handling"), "customs_declaration_no": ("declaration", "bayan", "بيان", "decl")})
+        totals = {key: 0.0 for key in columns if key != "customs_declaration_no"}; declaration = ""
+        for row in sheet.iter_rows(min_row=header + 1, values_only=True):
+            for key, index in columns.items():
+                value = row[index] if index < len(row) else None
+                if value in (None, ""): continue
+                if key == "customs_declaration_no": declaration = declaration or str(value).strip(); continue
+                try: totals[key] += float(str(value).replace(",", ""))
+                except ValueError: pass
+        return {**{k: round(v, 2) for k, v in totals.items()}, "customs_declaration_no": declaration}
+    finally: workbook.close()
+
+
+INVOICE_TEMPLATE = {
+    "sales": ["Invoice No", "Date", "Customer", "Currency", "Item Code", "Description", "Qty", "Unit", "Unit Price", "Discount %", "VAT %", "VAT Treatment"],
+    "purchases": ["Invoice No", "Date", "Supplier", "Currency", "Item Code", "Item Name", "Qty", "Unit", "Unit Cost", "Discount %", "VAT %", "Warehouse"],
+}
+
+
+def write_invoice_template(path, kind):
+    """The Excel format Saber reads for multi-line invoices: one row per line; rows with the same Invoice No form one invoice."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+    wb = Workbook(); ws = wb.active; ws.title = "Invoices"; headers = INVOICE_TEMPLATE[kind]; ws.append(headers)
+    for cell in ws[1]: cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="071B2E")
+    examples = wb.create_sheet("Examples")
+    examples.append(headers)
+    if kind == "sales":
+        examples.append(["INV-001", "25-09-2026", "Client A", "USD", "ITM-00001", "HPL Panel 8mm", 10, "sheet", 120, 0, 11, "Taxable"])
+        examples.append(["INV-001", "25-09-2026", "Client A", "USD", "", "Installation service", 1, "job", 300, 10, 11, "Taxable"])
+        examples.append(["INV-002", "26-09-2026", "Export Client", "USD", "", "Cladding panels (export)", 5, "sheet", 150, 0, 0, "Zero-rated"])
+    else:
+        examples.append(["PUR-778", "20-09-2026", "Supplier A", "USD", "", "HPL Panel 8mm", 50, "sheet", 80, 0, 11, "MAIN"])
+        examples.append(["PUR-778", "20-09-2026", "Supplier A", "USD", "", "Aluminium Profile", 200, "m", 8, 5, 11, "MAIN"])
+    help_sheet = wb.create_sheet("How to fill")
+    for line in ("Fill the blank Invoices sheet; Examples are for reference and will not be imported.",
+                 "One row per invoice line. Rows with the same Invoice No become one invoice.", "Date: DD-MM-YYYY. Currency: USD, LBP, EUR or AED.",
+                 "Item Code: optional. Purchases: an item that does not exist is created automatically from its name.",
+                 "VAT Treatment (sales): Taxable, Zero-rated, Exempt or Out of scope. VAT %: 11 or 0.", "Warehouse (purchases): warehouse code, MAIN by default."):
+        help_sheet.append([line])
+    for column, width in zip("ABCDEFGHIJKL", (12, 12, 22, 9, 12, 30, 7, 8, 11, 10, 7, 14)): ws.column_dimensions[column].width = width
+    for column, width in zip("ABCDEFGHIJKL", (12, 12, 22, 9, 12, 30, 7, 8, 11, 10, 7, 14)): examples.column_dimensions[column].width = width
+    wb.save(path)
+
+
+def read_invoice_lines(path, kind):
+    """Rows of the invoice template grouped into invoices: [{header..., lines: [...]}]."""
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet = workbook.worksheets[0]; party = "customer" if kind == "sales" else "supplier"
+        header, columns = _header_map(sheet, {"number": ("invoice no", "invoice", "number", "رقم"), "date": ("date", "تاريخ"), "party": (party, "client", "vendor", "name of"),
+            "currency": ("currency", "عملة"), "item_code": ("item code", "code", "sku"), "description": ("description", "item name", "item", "بيان"), "qty": ("qty", "quantity", "كمية"),
+            "unit": ("unit",), "price": ("unit price", "unit cost", "price", "cost"), "discount": ("discount",), "vat": ("vat %", "vat"), "treatment": ("treatment",), "warehouse": ("warehouse", "store")})
+        invoices = {}; order = []
+        for number, row in enumerate(sheet.iter_rows(min_row=header + 1, values_only=True), header + 1):
+            if not any(value not in (None, "") for value in row): continue
+            get = lambda field: row[columns[field]] if field in columns and columns[field] < len(row) else None
+            def number_of(field, default=0.0):
+                value = get(field)
+                try: return float(str(value).replace(",", "").replace("%", "")) if value not in (None, "") else default
+                except ValueError: raise ValueError(f"Row {number}: {field} must be a number")
+            key = str(get("number") or f"ROW-{number}").strip()
+            if key not in invoices:
+                invoices[key] = {"invoice_number": key, "invoice_date": _date(get("date")), "party_name": str(get("party") or "").strip(), "currency": str(get("currency") or "USD").strip().upper()[:3],
+                                 "vat_treatment": str(get("treatment") or "Taxable").strip(), "warehouse": str(get("warehouse") or "MAIN").strip() or "MAIN", "lines": [], "source_row": number}
+                order.append(key)
+            if not invoices[key]["party_name"]: raise ValueError(f"Row {number}: enter the {party}")
+            qty = number_of("qty", 1.0); price = number_of("price"); discount = number_of("discount"); vat = number_of("vat", 11.0)
+            if qty <= 0 or price < 0: raise ValueError(f"Row {number}: quantity must be above 0 and price cannot be negative")
+            invoices[key]["lines"].append({"item_code": str(get("item_code") or "").strip(), "description": str(get("description") or "").strip() or "Line", "quantity": qty,
+                                           "unit": str(get("unit") or "").strip(), "unit_price": price, "discount_percent": discount, "vat_rate": vat})
+        return [invoices[key] for key in order]
+    finally: workbook.close()
