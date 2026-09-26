@@ -909,7 +909,9 @@ class SaberApp(V22Mixin, InventoryMixin, Stage3Mixin, DimensionsMixin, BrainsScr
             tk.Button(toolbar,text=text,command=command,bg=NAVY,fg="white",border=0,padx=10,pady=4).pack(side="left",padx=2)
         for text,command in (("Import Excel",self.import_sales_excel),("Import PDF",self.import_sales_pdf)):
             tk.Button(toolbar,text=text,command=command,bg=GOLD,fg=NAVY,border=0,padx=10,pady=4).pack(side="left",padx=(8 if text=="Import Excel" else 2,2))
-        body=tk.Frame(self.sales_tab,bg=LIGHT); body.pack(fill="both",expand=True,padx=10,pady=(2,4))
+        # Totals bar is pinned to the very bottom of the tab FIRST, so it can never be pushed off-screen by the table
+        bottom=tk.Frame(self.sales_tab,bg=LIGHT); bottom.pack(side="bottom",fill="x",padx=10,pady=(0,4))
+        body=tk.Frame(self.sales_tab,bg=LIGHT); body.pack(side="top",fill="both",expand=True,padx=10,pady=(2,4))
         # Item table on top, enlarged
         items_area=tk.Frame(body,bg=LIGHT); items_area.pack(side="top",fill="both",expand=True)
         sheet_frame=tk.Frame(items_area,bg=LIGHT); sheet_frame.pack(fill="both",expand=True)
@@ -921,8 +923,6 @@ class SaberApp(V22Mixin, InventoryMixin, Stage3Mixin, DimensionsMixin, BrainsScr
         self.sales_sheet.pack(side="left",fill="both",expand=True); scroll.pack(side="right",fill="y")
         self.sales_sheet.bind("<Double-1>",self.edit_sales_cell); self.sales_sheet.bind("<Return>",self.edit_sales_cell)
         self.sales_sheet.bind("<Delete>",lambda _event:self.remove_sales_item())
-        # Totals block moved BELOW the items
-        bottom=tk.Frame(body,bg=LIGHT); bottom.pack(side="bottom",fill="x",pady=(6,0))
         totals=tk.Frame(bottom,bg=LIGHT); totals.pack(side="right",fill="y",padx=(8,0))
         box=tk.Frame(totals,bg="#dfe6ee",padx=8,pady=3); box.pack(side="top",fill="x")
         discount=tk.Frame(box,bg="#dfe6ee"); discount.grid(row=0,column=0,columnspan=2,sticky="e",pady=(0,2))
