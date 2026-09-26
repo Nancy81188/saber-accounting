@@ -2238,22 +2238,7 @@ class SaberApp(tk.Tk):
             (export_excel if format_name=="xlsx" else export_pdf)(path,title,headers,rows)
             messagebox.showinfo("Saber Accounting",f"Saved successfully:\n{path}")
         except Exception as exc: messagebox.showerror("Saber Accounting",str(exc))
-# In your UI code (e.g., inside your Entry form)
-def on_ai_suggest_click():
-    desc = expense_entry.get() # Get text from the input box
-    # Call the server we just built
-    response = requests.post(f"{LOCAL_URL}/ai/suggest-account", json={"description": desc})
-    
-    if response.status_code == 200:
-        result = response.json()
-        # Automatically fill the Account Code dropdown/entry
-        account_code_entry.delete(0, tk.END)
-        account_code_entry.insert(0, result['code'])
-        
-        # Show the reason in a small label or tooltip
-        status_label.config(text=f"AI Suggestion: {result['reason']}")
-    else:
-        status_label.config(text="AI could not find a match.")
+
 def main(): SaberApp().mainloop()
 
 if __name__ == "__main__": main()
