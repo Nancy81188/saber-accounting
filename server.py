@@ -479,6 +479,7 @@ def main():
     args = parser.parse_args()
     Path(args.database).parent.mkdir(parents=True, exist_ok=True)
     run_server(args.host, args.port, args.database, args.admin_password)
+
 # Inside your server.py
 from ai_mapper import suggest_account
 
