@@ -480,7 +480,6 @@ def main():
     Path(args.database).parent.mkdir(parents=True, exist_ok=True)
     run_server(args.host, args.port, args.database, args.admin_password)
 
-# Inside your server.py
 from ai_mapper import suggest_account
 
 @app.route('/ai/suggest-account', methods=['POST'])
