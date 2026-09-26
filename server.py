@@ -479,6 +479,17 @@ def main():
     args = parser.parse_args()
     Path(args.database).parent.mkdir(parents=True, exist_ok=True)
     run_server(args.host, args.port, args.database, args.admin_password)
+# Inside your server.py
+from ai_mapper import suggest_account
 
+@app.route('/ai/suggest-account', methods=['POST'])
+def ai_suggest():
+    data = request.json
+    description = data.get("description", "")
+    if not description:
+        return jsonify({"error": "No description provided"}), 400
+    
+    suggestion = suggest_account(description)
+    return jsonify(suggestion)
 if __name__ == "__main__":
     main()
